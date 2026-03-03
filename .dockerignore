@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/*.log
+
+# Environment files (will be passed via docker-compose)
+.env
+.env.*
+
+# Documentation
+*.md
+
+# Lock files (using requirements.txt instead)
+uv.lock
+
+# Assets
+assets/
+
+# Test files
+test_*.py
+*_test.py
