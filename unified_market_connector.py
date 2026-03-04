@@ -8,7 +8,7 @@ data from adapters and publishes them to the AgentRouterNode.
 Usage:
     # With Coinbase
     python unified_market_connector.py --provider coinbase --symbols BTC-USD ETH-USD
-    
+
     # With TopstepX
     TOPSTEPX_JWT_TOKEN=your_token python unified_market_connector.py \
         --provider topstepx --symbols CON.F.US.ES.H26 CON.F.US.NQ.H26
@@ -23,11 +23,14 @@ import sys
 import time
 from typing import Optional
 
-from dotenv import load_dotenv
-
+import uuid_utils
+from calfkit._vendor.pydantic_ai import ModelRequest
 from calfkit.broker.broker import BrokerClient
+from calfkit.models.event_envelope import EventEnvelope
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.runners.service_client import RouterServiceClient
+from dotenv import load_dotenv
+
 from market_data_adapter import Candle, DepthLevel, MarketDataAdapter, Quote, Trade
 
 logging.basicConfig(
@@ -44,11 +47,11 @@ PRICE_TOPIC = "market_data.prices"
 
 class UnifiedMarketConnector:
     """Unified connector for any MarketDataAdapter.
-    
+
     Receives normalized market data from adapters and publishes to Kafka
     for consumption by trading agents.
     """
-    
+
     def __init__(
         self,
         broker: BrokerClient,
@@ -60,7 +63,7 @@ class UnifiedMarketConnector:
         candles_only: bool = False,
     ):
         """Initialize unified connector.
-        
+
         Args:
             broker: Kafka broker client
             router_node: Agent router node to publish to
@@ -71,84 +74,128 @@ class UnifiedMarketConnector:
             candles_only: If True, disable WebSocket streaming and only fetch candles via REST
         """
         self._broker = broker
+        self._router_node = router_node
         self._client = RouterServiceClient(broker, router_node)
         self._adapter = adapter
         self._min_interval = min_publish_interval
         self._enable_candles = enable_candles
         self._candle_interval = candle_interval_seconds
         self._candles_only = candles_only
-        
+
         self._running = False
         self._last_publish_time: dict[str, float] = {}
         self._latest_quotes: dict[str, Quote] = {}
-        
+
         # Set adapter callbacks
         adapter._on_quote = self._on_quote
         adapter._on_trade = self._on_trade
         adapter._on_candle = self._on_candle
         adapter._on_depth = self._on_depth
-    
+
+    async def _publish_to_agent(
+        self, user_prompt: str, deps: dict | None = None
+    ) -> None:
+        """Publish directly to agent.
+
+        The agent's FuturesAgentRouterNode will set allow_text_output=False
+        to force OpenAI to return structured tool calls instead of text.
+
+        Args:
+            user_prompt: The prompt to send to the agent
+            deps: Optional dependencies dict
+        """
+        correlation_id = uuid_utils.uuid7().hex
+
+        # Create event envelope (agent will add ModelRequestParameters)
+        event_envelope = EventEnvelope(
+            trace_id=correlation_id,
+            patch_model_request_params=None,  # Let agent set this with tools
+            thread_id=None,
+            system_message=self._router_node.system_message,
+            final_response_topic=None,
+            deps=deps,
+        )
+        event_envelope.mark_as_start_of_turn()
+        event_envelope.prepare_uncommitted_agent_messages(
+            [ModelRequest.user_text_prompt(user_prompt)]
+        )
+        if self._router_node.name is not None:
+            event_envelope.name = self._router_node.name
+
+        # Ensure broker is started
+        if not self._broker._connection:
+            await self._broker.start()
+
+        # Publish directly to the router's subscribed topic
+        await self._broker.publish(
+            event_envelope,
+            topic=self._router_node.subscribed_topic or "",
+            correlation_id=correlation_id,
+        )
+
     async def start(self) -> None:
         """Start the connector and begin consuming market data."""
         logger.info("Starting unified market connector")
         self._running = True
-        
+
         # Start adapter WebSocket connection (unless candles-only mode)
         if not self._candles_only:
             await self._adapter.start()
             logger.info("WebSocket streaming enabled")
         else:
             logger.info("Candles-only mode: WebSocket streaming disabled")
-        
+
         # Start candle refresh task if enabled
         if self._enable_candles:
             asyncio.create_task(self._refresh_candles_loop())
-        
+
         logger.info("Unified market connector started")
-    
+
     async def stop(self) -> None:
         """Stop the connector."""
         logger.info("Stopping unified market connector")
         self._running = False
-        
+
         await self._adapter.stop()
-        
+
         logger.info("Unified market connector stopped")
-    
+
     def _on_quote(self, quote: Quote) -> None:
         """Handle quote update from adapter.
-        
+
         Args:
             quote: Quote data
         """
         # Store latest quote
         self._latest_quotes[quote.symbol] = quote
-        
+
         # Check if we should publish (throttling)
         now = time.time()
         last_publish = self._last_publish_time.get(quote.symbol, 0)
-        
+
         if now - last_publish < self._min_interval:
             return  # Too soon, skip
-        
+
         self._last_publish_time[quote.symbol] = now
-        
+
         # Build prompt and publish
         asyncio.create_task(self._publish_quote(quote))
-    
+
     def _on_trade(self, trade: Trade) -> None:
         """Handle trade update from adapter.
-        
+
         Args:
             trade: Trade data
         """
         # Trades can be published directly without throttling
         # or you can add throttling if needed
-        logger.debug(f"Trade: {trade.symbol} @ {trade.price} x {trade.size} ({trade.side})")
-    
+        logger.debug(
+            f"Trade: {trade.symbol} @ {trade.price} x {trade.size} ({trade.side})"
+        )
+
     def _on_candle(self, candle: Candle) -> None:
         """Handle candle update from adapter.
-        
+
         Args:
             candle: Candle data
         """
@@ -156,18 +203,20 @@ class UnifiedMarketConnector:
             f"Candle: {candle.symbol} {candle.timestamp} "
             f"O:{candle.open} H:{candle.high} L:{candle.low} C:{candle.close} V:{candle.volume}"
         )
-    
+
     def _on_depth(self, depth: DepthLevel) -> None:
         """Handle depth update from adapter.
-        
+
         Args:
             depth: Depth level data
         """
-        logger.debug(f"Depth: {depth.symbol} {depth.side} @ {depth.price} x {depth.size}")
-    
+        logger.debug(
+            f"Depth: {depth.symbol} {depth.side} @ {depth.price} x {depth.size}"
+        )
+
     async def _publish_quote(self, quote: Quote) -> None:
         """Publish quote to agent router.
-        
+
         Args:
             quote: Quote to publish
         """
@@ -181,71 +230,73 @@ class UnifiedMarketConnector:
                 f"Ask: ${quote.best_ask:,.2f} x {quote.best_ask_size}",
                 f"Spread: ${quote.spread():.6f}",
             ]
-            
+
             if quote.volume_24h:
                 prompt_parts.append(f"24h Volume: {quote.volume_24h:,.2f}")
             if quote.open_24h:
                 change = quote.last_price - quote.open_24h
                 change_pct = (change / quote.open_24h) * 100
                 prompt_parts.append(f"24h Change: ${change:+.2f} ({change_pct:+.2f}%)")
-            
+
             prompt = "\n".join(prompt_parts)
-            
-            # Publish to agent router
-            await self._client.invoke(
+
+            # Publish to agent router with allow_text_output=False
+            await self._publish_to_agent(
                 user_prompt=prompt,
                 deps={"invoked_at": time.time()},
             )
-            
+
             logger.debug(f"Published quote for {quote.symbol}")
-            
+
         except Exception as e:
             logger.error(f"Error publishing quote: {e}")
-    
+
     async def _refresh_candles_loop(self) -> None:
         """Periodically fetch and publish historical candles."""
         from datetime import timedelta
-        
-        logger.info(f"Starting candle refresh loop (interval: {self._candle_interval}s)")
-        
+
+        logger.info(
+            f"Starting candle refresh loop (interval: {self._candle_interval}s)"
+        )
+
         while self._running:
             try:
                 await asyncio.sleep(self._candle_interval)
-                
+
                 if not self._running:
                     break
-                
+
                 # Fetch candles for all symbols
                 for symbol in self._adapter._symbols:
                     await self._fetch_and_publish_candles(symbol)
-                    
+
             except Exception as e:
                 logger.error(f"Error in candle refresh loop: {e}")
-    
+
     async def _fetch_and_publish_candles(self, symbol: str) -> None:
         """Fetch historical candles for a symbol and include in next publish.
-        
+
         Args:
             symbol: Symbol to fetch candles for
         """
         from datetime import datetime, timedelta, timezone
-        
+
         try:
             now = datetime.now(timezone.utc)
-            
+
             # Fetch multiple timeframes (similar to original implementation)
             timeframes = [
                 (900, 180, 90, "15-min candles (3h ago -> 90min ago)"),
                 (300, 90, 20, "5-min candles (90min ago -> 20min ago)"),
                 (60, 20, 0, "1-min candles (last 20 minutes)"),
             ]
-            
+
             prompt_parts = [f"\nHistorical Candles for {symbol}:"]
-            
+
             for granularity, lookback_mins, offset_mins, description in timeframes:
                 start_time = now - timedelta(minutes=lookback_mins)
                 end_time = now - timedelta(minutes=offset_mins)
-                
+
                 candles = await self._adapter.fetch_candles(
                     symbol=symbol,
                     granularity_seconds=granularity,
@@ -253,7 +304,7 @@ class UnifiedMarketConnector:
                     end_time=end_time,
                     limit=100,
                 )
-                
+
                 if candles:
                     prompt_parts.append(f"\n{description}:")
                     prompt_parts.append("Time,Open,High,Low,Close,Volume")
@@ -263,24 +314,24 @@ class UnifiedMarketConnector:
                             f"{candle.open},{candle.high},{candle.low},"
                             f"{candle.close},{candle.volume}"
                         )
-            
+
             # Get latest quote for this symbol
             quote = self._latest_quotes.get(symbol)
             if quote:
                 prompt_parts.insert(
                     0,
                     f"Current Price: {quote.symbol} @ ${quote.last_price:,.2f} "
-                    f"(Bid: ${quote.best_bid:,.2f}, Ask: ${quote.best_ask:,.2f})"
+                    f"(Bid: ${quote.best_bid:,.2f}, Ask: ${quote.best_ask:,.2f})",
                 )
-            
-            # Publish enriched data
-            await self._client.invoke(
+
+            # Publish enriched data with allow_text_output=False
+            await self._publish_to_agent(
                 user_prompt="\n".join(prompt_parts),
                 deps={"invoked_at": time.time()},
             )
-            
+
             logger.debug(f"Published candles for {symbol}")
-            
+
         except Exception as e:
             logger.error(f"Error fetching/publishing candles for {symbol}: {e}")
 
@@ -333,15 +384,17 @@ async def main():
         help="Kafka bootstrap servers (default: localhost:9092 or KAFKA_BOOTSTRAP_SERVERS env var)",
     )
     args = parser.parse_args()
-    
+
     # Initialize Kafka broker
     # Priority: CLI arg > env var > default
-    kafka_servers = args.bootstrap_servers or os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    kafka_servers = args.bootstrap_servers or os.getenv(
+        "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+    )
     broker = BrokerClient(
         bootstrap_servers=kafka_servers.split(","),
         client_id="unified-market-connector",
     )
-    
+
     # Create dummy router node (just for publishing)
     # In production, you'd reference the actual router node
     router_node = AgentRouterNode(
@@ -350,37 +403,37 @@ async def main():
         name=args.router_name,
         system_prompt="",
     )
-    
+
     # Initialize appropriate adapter
     if args.provider == "coinbase":
         from coinbase_adapter import CoinbaseAdapter
-        
+
         adapter = CoinbaseAdapter(symbols=args.symbols)
         logger.info(f"Using Coinbase adapter for: {args.symbols}")
-        
+
     elif args.provider == "topstepx":
         from topstepx_adapter import TopstepXAdapter
         from topstepx_auth import authenticate_topstepx
-        
+
         jwt_token = os.getenv("TOPSTEPX_JWT_TOKEN")
         environment = os.getenv("TOPSTEPX_ENVIRONMENT", "topstepx")
         api_base_url = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com")
-        
+
         # If no JWT token, try to authenticate with API key
         if not jwt_token:
             username = os.getenv("TOPSTEPX_USERNAME")
             api_key = os.getenv("TOPSTEPX_API_KEY")
-            
+
             if username and api_key:
                 logger.info("No JWT token found, authenticating with API key...")
                 jwt_token = await authenticate_topstepx(
                     username, api_key, environment, api_base_url
                 )
-                
+
                 if not jwt_token:
                     logger.error("Authentication with API key failed")
                     sys.exit(1)
-                
+
                 logger.info("✓ Authenticated successfully! Token obtained.")
             else:
                 logger.error(
@@ -391,7 +444,7 @@ async def main():
                     "  python topstepx_auth.py --username YOUR_USERNAME --api-key YOUR_API_KEY"
                 )
                 sys.exit(1)
-        
+
         adapter = TopstepXAdapter(
             jwt_token=jwt_token,
             symbols=args.symbols,
@@ -399,7 +452,7 @@ async def main():
             api_base_url=api_base_url,
         )
         logger.info(f"Using TopstepX adapter ({environment}) for: {args.symbols}")
-    
+
     # Create unified connector
     connector = UnifiedMarketConnector(
         broker=broker,
@@ -409,26 +462,26 @@ async def main():
         candle_interval_seconds=args.candle_interval,
         candles_only=args.candles_only,
     )
-    
+
     # Handle shutdown
     shutdown_event = asyncio.Event()
-    
+
     def handle_shutdown(signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
         shutdown_event.set()
-    
+
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
-    
+
     # Start connector
     await connector.start()
-    
+
     # Wait for shutdown signal
     await shutdown_event.wait()
-    
+
     # Stop connector
     await connector.stop()
-    
+
     logger.info("Shutdown complete")
 
 

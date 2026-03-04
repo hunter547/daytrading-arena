@@ -19,16 +19,33 @@ import argparse
 import asyncio
 import sys
 
+from calfkit._vendor.pydantic_ai.models import ModelRequestParameters
 from calfkit.broker.broker import BrokerClient
 from calfkit.nodes.agent_router_node import AgentRouterNode
 from calfkit.nodes.chat_node import ChatNode
 from calfkit.runners.service import NodesService
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
+
 from trading_tools import calculator, execute_trade, get_portfolio
+
+# Monkey-patch ModelRequestParameters to force allow_text_output=False by default
+# This ensures all instances created by AgentRouterNode will have the correct value
+_original_model_request_params_init = ModelRequestParameters.__init__
+
+
+def _patched_model_request_params_init(self, **kwargs):
+    """Patched __init__ that forces allow_text_output=False."""
+    if "allow_text_output" not in kwargs:
+        kwargs["allow_text_output"] = False
+    _original_model_request_params_init(self, **kwargs)
+
+
+ModelRequestParameters.__init__ = _patched_model_request_params_init
 
 # Import TopstepX tools if available
 try:
-    from topstepx_trading_tools import topstepx_buy, topstepx_sell, topstepx_portfolio
+    from topstepx_trading_tools import topstepx_buy, topstepx_portfolio, topstepx_sell
+
     TOPSTEPX_AVAILABLE = True
 except ImportError:
     TOPSTEPX_AVAILABLE = False
@@ -111,28 +128,28 @@ STRATEGIES: dict[str, str] = {
     "futures": (
         "You are a futures day trader operating on TopstepX practice account (ID: 19424999). "
         "You trade Micro E-mini futures contracts using TopstepX tools.\n\n"
-        "YOUR TOOLS:\n"
-        "- topstepx_buy(contract, quantity): Go LONG or close SHORT positions\n"
-        "- topstepx_sell(contract, quantity): Go SHORT or close LONG positions\n"
-        "- topstepx_portfolio(): Check your TopstepX positions and P&L\n"
-        "- calculator: For position sizing and P&L calculations\n\n"
-        "AVAILABLE CONTRACTS:\n"
-        "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point, $1.25/tick)\n"
-        "- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 ($2/point, $0.50/tick)\n\n"
-        "TRADING RULES:\n"
-        "- Start with 1 contract positions\n"
-        "- Practice account has $150,000 starting balance\n"
-        "- Use proper risk management\n"
-        "- Check portfolio before trading\n"
-        "- Maximum 2 positions at once\n\n"
-        "STRATEGY:\n"
-        "- Analyze market data when invoked\n"
-        "- Look for momentum and trend signals\n"
-        "- Enter trades with clear conviction\n"
-        "- Use stop losses mentally (close losing positions)\n"
-        "- Take profits when targets are hit\n\n"
-        "When you receive market updates, check your portfolio first, analyze the data, "
-        "then decide whether to enter, exit, or hold. Explain your reasoning."
+        "CRITICAL RULE - NO TEXT-ONLY RESPONSES:\n"
+        "Your ONLY way to interact with the account is through ACTUAL FUNCTION CALLS.\n"
+        "DO NOT write text describing function calls. DO NOT explain what you 'would' do.\n"
+        "You MUST call at least one function on EVERY SINGLE response. No exceptions.\n\n"
+        "AVAILABLE TOOLS (call these, don't describe them):\n"
+        "- topstepx_portfolio(): REQUIRED on every invocation - check positions first\n"
+        '- topstepx_buy(contract, quantity): Go LONG (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
+        '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MNQ.H26", quantity=1)\n'
+        "- calculator(expression): Calculate P&L, position sizes, etc.\n\n"
+        "CONTRACTS:\n"
+        "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point)\n"
+        "- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 ($2/point)\n\n"
+        "MANDATORY WORKFLOW:\n"
+        "1. ALWAYS start by calling topstepx_portfolio() - do this NOW, not later\n"
+        "2. After receiving portfolio data, analyze market conditions\n"
+        "3. If you see an opportunity, call topstepx_buy() or topstepx_sell()\n"
+        "4. If no clear opportunity, wait (but you still MUST call topstepx_portfolio first)\n\n"
+        "REMEMBER: \n"
+        "- WRONG: Writing 'I will call topstepx_portfolio()' or explaining your reasoning first\n"
+        "- RIGHT: Actually calling topstepx_portfolio() as your FIRST action in every response\n"
+        "- Your response must include AT LEAST ONE function call, preferably topstepx_portfolio()\n"
+        "- Text explanation can come AFTER function calls, never before or instead of them"
     )
     + _REASONING_ADDENDUM,
 }
@@ -194,18 +211,26 @@ async def main() -> None:
             sys.exit(1)
         tools = [topstepx_buy, topstepx_sell, topstepx_portfolio, calculator]  # type: ignore
         print("  ✓ TopstepX tools enabled (futures mode)")
+        print("  ✓ allow_text_output=False enforced (monkey-patched)")
+        # Standard router - monkey-patch forces allow_text_output=False
+        router = AgentRouterNode(
+            chat_node=chat_node,
+            tool_nodes=tools,
+            name=args.name,
+            message_history_store=InMemoryMessageHistoryStore(),
+            system_prompt=system_prompt,
+        )
     else:
         # Crypto trading: Use standard tools
         tools = [execute_trade, get_portfolio, calculator]
         print("  ✓ Crypto trading tools enabled")
-    
-    router = AgentRouterNode(
-        chat_node=chat_node,
-        tool_nodes=tools,
-        name=args.name,
-        message_history_store=InMemoryMessageHistoryStore(),
-        system_prompt=system_prompt,
-    )
+        router = AgentRouterNode(
+            chat_node=chat_node,
+            tool_nodes=tools,
+            name=args.name,
+            message_history_store=InMemoryMessageHistoryStore(),
+            system_prompt=system_prompt,
+        )
     service.register_node(router, group_id=args.name)
 
     tool_names = ", ".join(t.tool_schema.name for t in tools)
@@ -215,6 +240,16 @@ async def main() -> None:
     print(f"  - Input:    {router.subscribed_topic}")
     print(f"  - Reply:    {router.entrypoint_topic}")
     print(f"  - Tools:    {tool_names}")
+
+    # Debug: Print tool schemas to verify OpenAI format
+    print("\nTool schemas (OpenAI format check):")
+    import json
+
+    for tool in tools:
+        schema = tool.tool_schema
+        print(f"  📦 {schema.name}")
+        print(f"     Full schema: {json.dumps(vars(schema), indent=6, default=str)}")
+        print()
 
     print("\nRouter node ready. Waiting for requests...")
     await service.run()

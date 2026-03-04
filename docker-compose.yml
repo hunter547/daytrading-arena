@@ -37,7 +37,13 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test:
+        [
+          "CMD",
+          "kafka-broker-api-versions",
+          "--bootstrap-server",
+          "localhost:9092",
+        ]
       interval: 10s
       timeout: 10s
       retries: 5
@@ -61,6 +67,7 @@ services:
       --provider topstepx
       --symbols CON.F.US.MES.H26 CON.F.US.MNQ.H26
       --bootstrap-servers kafka:9092
+      --router-name futures-trader
       --candles-only
     networks:
       - trading-network
@@ -136,7 +143,7 @@ services:
       --name gpt5-nano
       --model-id gpt-5-nano
       --bootstrap-servers kafka:9092
-      --reasoning-effort low
+      --reasoning-effort high
     networks:
       - trading-network
     restart: unless-stopped
