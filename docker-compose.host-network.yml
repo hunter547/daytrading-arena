@@ -1,15 +1,14 @@
+# Host-network variant for servers with broken Docker bridge networking.
+# Usage: docker compose -f docker-compose.host-network.yml up
 services:
   # 1. Zookeeper (required by Kafka)
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: futures-zookeeper
+    network_mode: host
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
-    networks:
-      - trading-network
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "2181"]
       interval: 10s
@@ -20,43 +19,36 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: futures-kafka
+    network_mode: host
     depends_on:
       zookeeper:
         condition: service_healthy
-    ports:
-      - "9092:9092"
-      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ZOOKEEPER_CONNECT: localhost:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    networks:
-      - trading-network
     healthcheck:
-      test:
-        [
-          "CMD",
-          "kafka-broker-api-versions",
-          "--bootstrap-server",
-          "localhost:9092",
-        ]
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
       timeout: 10s
       retries: 5
 
-  # 3. Market Data Connector (TopstepX → Kafka) - THIS TRIGGERS THE AGENT!
+  # 3. Market Data Connector (TopstepX → Kafka)
   market-connector:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: futures-market-connector
+    network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
       - TOPSTEPX_JWT_TOKEN=${TOPSTEPX_JWT_TOKEN}
@@ -66,24 +58,24 @@ services:
       python unified_market_connector.py
       --provider topstepx
       --symbols CON.F.US.MES.H26 CON.F.US.MNQ.H26
-      --bootstrap-servers kafka:9092
-      --router-name futures-trader
+      --bootstrap-servers localhost:9092
       --candles-only
-    networks:
-      - trading-network
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
 
   # 4. TopstepX Trading Tools Service
   trading-tools:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: futures-trading-tools
+    network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
       - TOPSTEPX_JWT_TOKEN=${TOPSTEPX_JWT_TOKEN}
@@ -91,24 +83,23 @@ services:
       - SERVICE_NAME=topstepx_trading_tools
     command: >
       python topstepx_trading_tools.py
-      --bootstrap-servers kafka:9092
-    networks:
-      - trading-network
+      --bootstrap-servers localhost:9092
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
 
-  # 5. Tools & Dashboard (Trading Tools + Terminal UI)
-  # NOTE: This service is for CRYPTO trading (Coinbase), not futures
-  # For futures trading, disable this service or use --scale dashboard=0
+  # 5. Tools & Dashboard (Crypto - optional)
   dashboard:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: futures-dashboard
+    network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
       - TOPSTEPX_JWT_TOKEN=${TOPSTEPX_JWT_TOKEN}
@@ -116,44 +107,44 @@ services:
       - SERVICE_NAME=tools_and_dashboard
     command: >
       python tools_and_dashboard.py
-      --bootstrap-servers kafka:9092
-    networks:
-      - trading-network
+      --bootstrap-servers localhost:9092
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
     profiles:
       - crypto
-    # Note: Dashboard is terminal-based (Rich), not web-based
-    # To view: docker-compose logs -f dashboard
 
   # 6. ChatNode (LLM Inference - GPT-5 Nano)
   chatnode:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: futures-chatnode
+    network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SERVICE_NAME=deploy_chat_node
     command: >
       python deploy_chat_node.py
       --name gpt5-nano
       --model-id gpt-5-nano
-      --bootstrap-servers kafka:9092
-      --reasoning-effort high
-    networks:
-      - trading-network
+      --bootstrap-servers localhost:9092
+      --reasoning-effort low
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
 
   # 7. Agent Router (Futures Trader)
   agent:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: futures-agent
+    network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
@@ -164,44 +155,39 @@ services:
       trading-tools:
         condition: service_started
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - SERVICE_NAME=deploy_router_node
     command: >
       python deploy_router_node.py
       --name futures-trader
       --chat-node-name gpt5-nano
       --strategy futures
-      --bootstrap-servers kafka:9092
-    networks:
-      - trading-network
+      --bootstrap-servers localhost:9092
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
 
   # 8. Response Viewer (Optional - Agent Activity Monitor)
   response-viewer:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: futures-response-viewer
+    network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - SERVICE_NAME=response_viewer
     command: >
       python response_viewer.py
-      --bootstrap-servers kafka:9092
-    networks:
-      - trading-network
+      --bootstrap-servers localhost:9092
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
     profiles:
       - monitoring
-
-networks:
-  trading-network:
-    driver: bridge
 
 volumes:
   logs:
