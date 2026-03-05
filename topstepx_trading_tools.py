@@ -361,7 +361,7 @@ async def topstepx_portfolio(ctx: ToolContext) -> str:
         pnl_sign = "+" if pnl >= 0 else ""
         
         position_str = f"{pos['symbol']}: {direction} {abs(qty)} @ ${pos['avgPrice']:,.2f} (P&L: {pnl_sign}${pnl:,.2f})"
-        logger.info(f"💼 POSITION: {position_str}")
+        logger.info(f"💼 DISPLAYING: {position_str} (qty={qty})")
         
         lines.append(f"    {position_str}")
     

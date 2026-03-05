@@ -396,6 +396,10 @@ class TopstepXAdapter(MarketDataAdapter):
                 low_24h=float(data.get("low", 0)),
             )
             
+            # Update market price for PnL calculation
+            from topstepx_account import TopstepXAccountClient
+            TopstepXAccountClient.update_market_price(contract_id, last_price)
+            
             self._emit_quote(quote)
             
         except Exception as e:
