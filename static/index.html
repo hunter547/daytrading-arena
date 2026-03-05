@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TopstepX Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    padding: 16px;
+  }
+  h1 {
+    font-size: 18px;
+    margin-bottom: 16px;
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    display: inline-block;
+  }
+  .status-dot.connected { background: var(--green); }
+
+  /* Cards */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+  }
+  .card .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+  .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .card .value.positive { color: var(--green); }
+  .card .value.negative { color: var(--red); }
+
+  /* Positions table */
+  .section-title {
+    font-size: 13px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+    margin-top: 16px;
+  }
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    min-width: 600px;
+  }
+  th {
+    text-align: left;
+    padding: 10px 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    white-space: nowrap;
+  }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: none; }
+
+  /* Mobile card layout */
+  .pos-cards { display: none; }
+  .pos-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 8px;
+  }
+  .pos-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .pos-card-symbol { font-weight: 700; font-size: 14px; }
+  .pos-card-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+    font-size: 12px;
+  }
+  .pos-card-grid .label { color: var(--text-dim); }
+  .pos-card-actions { margin-top: 10px; }
+
+  @media (max-width: 640px) {
+    .table-wrap { display: none; }
+    .pos-cards { display: block; }
+  }
+  .btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-buy { background: var(--green); color: #000; }
+  .btn-sell { background: var(--red); color: #fff; }
+  .btn-close { background: var(--yellow); color: #000; }
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+
+  /* Trade controls */
+  .trade-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .trade-controls select, .trade-controls input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 13px;
+  }
+  .trade-controls input { width: 80px; }
+
+  /* Status log */
+  #log {
+    margin-top: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    max-height: 180px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  #log .entry { margin-bottom: 4px; }
+  #log .entry.success { color: var(--green); }
+  #log .entry.error { color: var(--red); }
+  .no-positions {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-dim);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .table-wrap .no-positions, table .no-positions {
+    border: none;
+    border-radius: 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>
+  <span class="status-dot" id="wsDot"></span>
+  TopstepX Dashboard
+  <span id="viewOnlyBadge" style="font-size:11px;color:var(--yellow);border:1px solid var(--yellow);padding:2px 8px;border-radius:4px;display:none">VIEW ONLY</span>
+  <span style="font-size:12px;color:var(--text-dim);margin-left:auto" id="accountName"></span>
+</h1>
+
+<div class="cards">
+  <div class="card"><div class="label">Equity</div><div class="value" id="equity">--</div></div>
+  <div class="card"><div class="label">Balance</div><div class="value" id="balance">--</div></div>
+  <div class="card"><div class="label">Unrealized P&L</div><div class="value" id="pnl">--</div></div>
+  <div class="card"><div class="label">Positions</div><div class="value" id="posCount">0</div></div>
+</div>
+
+<div class="section-title">Open Positions</div>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Contract</th>
+        <th>Side</th>
+        <th>Qty</th>
+        <th>Avg Price</th>
+        <th>Market Price</th>
+        <th>Unrealized P&L</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="positionsBody">
+      <tr><td colspan="7" class="no-positions">No open positions</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="pos-cards" id="positionsCards">
+  <div class="no-positions">No open positions</div>
+</div>
+
+<div id="tradeSection">
+<div class="section-title">Trade</div>
+<div class="trade-controls">
+  <select id="contractSelect">
+    <option value="CON.F.US.MES.H26">MES H26</option>
+    <option value="CON.F.US.MNQ.H26">MNQ H26</option>
+  </select>
+  <input type="number" id="qtyInput" value="1" min="1" max="100" placeholder="Qty">
+  <button class="btn btn-buy" onclick="placeTrade('buy')">BUY</button>
+  <button class="btn btn-sell" onclick="placeTrade('sell')">SELL</button>
+</div>
+</div>
+
+<div class="section-title">Activity Log</div>
+<div id="log"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (n, decimals=2) => {
+  if (n == null) return '--';
+  return n.toLocaleString('en-US', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
+};
+
+let viewOnly = false;
+
+function log(msg, cls='') {
+  const el = $('log');
+  const ts = new Date().toLocaleTimeString();
+  el.innerHTML = `<div class="entry ${cls}">[${ts}] ${msg}</div>` + el.innerHTML;
+  // Keep max 50 entries
+  while (el.children.length > 50) el.removeChild(el.lastChild);
+}
+
+// ── WebSocket ──────────────────────────────────────────
+let ws;
+let prices = {};
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    $('wsDot').classList.add('connected');
+    log('Connected to server');
+  };
+  ws.onclose = () => {
+    $('wsDot').classList.remove('connected');
+    log('Disconnected, reconnecting...', 'error');
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.error) { log(data.error, 'error'); return; }
+      updateDashboard(data);
+    } catch(err) {
+      console.error('WS parse error', err);
+    }
+  };
+}
+
+function updateDashboard(data) {
+  // Account info
+  $('accountName').textContent = data.name || '';
+  $('equity').textContent = '$' + fmt(data.equity);
+  $('balance').textContent = '$' + fmt(data.balance);
+
+  // Store prices
+  if (data.prices) prices = data.prices;
+
+  // Positions
+  const positions = data.positions || [];
+  $('posCount').textContent = positions.length;
+
+  let totalPnl = 0;
+  positions.forEach(p => totalPnl += (p.unrealizedPnL || 0));
+
+  const pnlEl = $('pnl');
+  pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + fmt(totalPnl);
+  pnlEl.className = 'value ' + (totalPnl >= 0 ? 'positive' : 'negative');
+
+  const equityEl = $('equity');
+  equityEl.className = 'value';
+
+  // Positions table + mobile cards
+  const tbody = $('positionsBody');
+  const cards = $('positionsCards');
+  if (positions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="no-positions">No open positions</td></tr>';
+    cards.innerHTML = '<div class="no-positions">No open positions</div>';
+    return;
+  }
+
+  tbody.innerHTML = positions.map(p => {
+    const qty = p.quantity;
+    const side = qty > 0 ? 'LONG' : 'SHORT';
+    const sideColor = qty > 0 ? 'var(--green)' : 'var(--red)';
+    const pnl = p.unrealizedPnL || 0;
+    const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const marketPrice = prices[p.symbol];
+    const mpStr = marketPrice != null ? '$' + fmt(marketPrice) : '--';
+    return `<tr>
+      <td>${p.symbol}</td>
+      <td style="color:${sideColor};font-weight:600">${side}</td>
+      <td>${Math.abs(qty)}</td>
+      <td>$${fmt(p.avgPrice)}</td>
+      <td>${mpStr}</td>
+      <td style="color:${pnlColor};font-weight:600">${pnl >= 0 ? '+' : ''}$${fmt(pnl)}</td>
+      <td>${viewOnly ? '' : `<button class="btn btn-close btn-sm" onclick="closePosition('${p.symbol}')">CLOSE</button>`}</td>
+    </tr>`;
+  }).join('');
+
+  cards.innerHTML = positions.map(p => {
+    const qty = p.quantity;
+    const side = qty > 0 ? 'LONG' : 'SHORT';
+    const sideColor = qty > 0 ? 'var(--green)' : 'var(--red)';
+    const pnl = p.unrealizedPnL || 0;
+    const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const marketPrice = prices[p.symbol];
+    const mpStr = marketPrice != null ? '$' + fmt(marketPrice) : '--';
+    const closeBtn = viewOnly ? '' : `<div class="pos-card-actions"><button class="btn btn-close btn-sm" onclick="closePosition('${p.symbol}')">CLOSE</button></div>`;
+    return `<div class="pos-card">
+      <div class="pos-card-header">
+        <span class="pos-card-symbol">${p.symbol}</span>
+        <span style="color:${sideColor};font-weight:600">${side} ${Math.abs(qty)}</span>
+      </div>
+      <div class="pos-card-grid">
+        <span class="label">Avg Price</span><span>$${fmt(p.avgPrice)}</span>
+        <span class="label">Mkt Price</span><span>${mpStr}</span>
+        <span class="label">P&L</span><span style="color:${pnlColor};font-weight:600">${pnl >= 0 ? '+' : ''}$${fmt(pnl)}</span>
+      </div>
+      ${closeBtn}
+    </div>`;
+  }).join('');
+}
+
+// ── Trade actions ──────────────────────────────────────
+async function placeTrade(action) {
+  const contract = $('contractSelect').value;
+  const quantity = parseInt($('qtyInput').value);
+  if (!quantity || quantity <= 0) { log('Invalid quantity', 'error'); return; }
+
+  log(`Placing ${action.toUpperCase()} ${quantity}x ${contract}...`);
+
+  try {
+    const resp = await fetch(`/api/${action}?contract=${encodeURIComponent(contract)}&quantity=${quantity}`, {method: 'POST'});
+    const data = await resp.json();
+    if (data.success) {
+      log(`${action.toUpperCase()} order placed successfully (ID: ${data.orderId || 'N/A'})`, 'success');
+    } else {
+      log(`${action.toUpperCase()} failed: ${data.error || 'Unknown error'}`, 'error');
+    }
+  } catch(err) {
+    log(`${action.toUpperCase()} error: ${err.message}`, 'error');
+  }
+}
+
+async function closePosition(contract) {
+  log(`Closing position: ${contract}...`);
+  try {
+    const resp = await fetch(`/api/close?contract=${encodeURIComponent(contract)}`, {method: 'POST'});
+    const data = await resp.json();
+    if (data.success) {
+      log(`Position ${contract} closed successfully`, 'success');
+    } else {
+      log(`Close failed: ${data.error || 'Unknown error'}`, 'error');
+    }
+  } catch(err) {
+    log(`Close error: ${err.message}`, 'error');
+  }
+}
+
+// Start: fetch config then connect
+fetch('/api/config').then(r => r.json()).then(cfg => {
+  viewOnly = cfg.viewOnly || false;
+  if (viewOnly) {
+    $('viewOnlyBadge').style.display = 'inline';
+    $('tradeSection').style.display = 'none';
+  }
+  connectWS();
+}).catch(() => connectWS());
+</script>
+</body>
+</html>
