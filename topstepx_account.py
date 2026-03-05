@@ -48,6 +48,35 @@ class TopstepXAccount:
 class TopstepXAccountClient:
     """Client for fetching TopstepX account data via REST API."""
     
+    # Class-level cache for current market prices (shared across instances)
+    _current_prices: dict[str, float] = {}
+    
+    @classmethod
+    def update_market_price(cls, symbol: str, price: float) -> None:
+        """Update the current market price for a symbol.
+        
+        This is used to calculate unrealized PnL for positions.
+        Should be called whenever a new quote is received.
+        
+        Args:
+            symbol: Contract ID (e.g., "CON.F.US.MES.H26")
+            price: Current market price
+        """
+        cls._current_prices[symbol] = price
+        logger.debug(f"Updated market price: {symbol} = ${price:,.2f}")
+    
+    @classmethod
+    def get_market_price(cls, symbol: str) -> Optional[float]:
+        """Get the current market price for a symbol.
+        
+        Args:
+            symbol: Contract ID
+            
+        Returns:
+            Current price or None if not available
+        """
+        return cls._current_prices.get(symbol)
+    
     def __init__(
         self,
         jwt_token: str,
@@ -183,21 +212,28 @@ class TopstepXAccountClient:
             can_trade = account_basic.get("canTrade", False)
             is_visible = account_basic.get("isVisible", True)
             
+            # Debug: Log account_basic to see what fields are available
+            logger.info(f"🔍 Account {account_id} ({name}) basic info: canTrade={can_trade}, isVisible={is_visible}, startingDayBalance={account_basic.get('startingDayBalance', 'N/A')}")
+            
             # Filter out accounts that can't trade or aren't visible
             if not account_id or not is_visible or not can_trade:
-                logger.debug(f"Skipping account {account_id}: canTrade={can_trade}, isVisible={is_visible}")
+                logger.info(f"⏭️ Skipping account {account_id} ({name}): canTrade={can_trade}, isVisible={is_visible}")
                 return None
             
             # Fetch positions for this account
             positions = await self.get_positions(account_id)
             
             # Calculate account metrics from positions
-            # Note: TopstepX API doesn't provide balance directly in search,
-            # so we'll need to get it from realtime updates or account details
-            balance = 0.0  # Placeholder - would come from account update events
-            equity = sum(pos.market_value for pos in positions)
             unrealized_pnl = sum(pos.unrealized_pnl for pos in positions)
             realized_pnl = sum(pos.realized_pnl for pos in positions)
+            
+            # Get account balance from basic info
+            # TopstepX returns "balance" field in the search endpoint
+            balance = float(account_basic.get("balance", 0.0))
+            logger.info(f"💰 Account {account_id} balance from API: ${balance:,.2f} | Unrealized PnL: ${unrealized_pnl:,.2f} | Equity: ${balance + unrealized_pnl:,.2f}")
+            
+            # Equity = Cash Balance + Unrealized PnL from positions
+            equity = balance + unrealized_pnl
             
             return TopstepXAccount(
                 account_id=str(account_id),
@@ -313,20 +349,35 @@ class TopstepXAccountClient:
             
             size = float(data.get("size", 0.0))
             avg_price = float(data.get("averagePrice", 0.0))
-            position_type = data.get("type", 0)  # 0=Long, 1=Short
+            position_type = data.get("type", 0)  # 0=Long (buy), 1=Short (sell)
             
-            # Calculate market value (requires current market price, which we don't have here)
-            # For now, use avg_price as market price
-            market_value = size * avg_price
+            # DEBUG: Log raw API data to verify type mapping
+            logger.info(f"🔍 API POSITION: contract={contract_id}, type={position_type}, size={size}, avgPrice={avg_price}")
             
-            # P&L calculations would require current market price
-            # Setting to 0.0 for now - should be updated with real-time data
-            unrealized_pnl = 0.0
+            # Get current market price for PnL calculation
+            current_price = self.get_market_price(contract_id)
+            
+            if current_price:
+                # Calculate unrealized PnL using current market price
+                # For futures: PnL = (current_price - avg_price) * size * multiplier
+                # Multiplier: MES=$5/point, MNQ=$2/point
+                # Simplified: just use price difference * size (will adjust with contract specs later)
+                price_diff = current_price - avg_price
+                unrealized_pnl = price_diff * size
+                market_value = current_price * size
+                logger.info(f"   💰 PnL CALC: current=${current_price:,.2f}, avg=${avg_price:,.2f}, diff=${price_diff:,.2f}, size={size}, PnL=${unrealized_pnl:,.2f}")
+            else:
+                # No current price available - use avg_price as fallback
+                market_value = size * avg_price
+                unrealized_pnl = 0.0
+                logger.warning(f"   ⚠️  No current price for {contract_id}, PnL = $0.00")
+            
             realized_pnl = 0.0
             
             # Adjust size for short positions (make negative)
-            if position_type == 1:  # Short
+            if position_type == 1:  # Short (sell)
                 size = -abs(size)
+                logger.info(f"   → Made negative for SHORT: size now = {size}")
             
             return TopstepXPosition(
                 symbol=contract_id,
