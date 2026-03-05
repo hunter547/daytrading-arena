@@ -3,6 +3,9 @@ import asyncio
 import logging
 
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from rich.live import Live
 
 from calfkit.broker.broker import BrokerClient
@@ -30,8 +33,6 @@ from trading_tools import (
 #
 # Prerequisites:
 #     - Kafka broker running at localhost:9092
-
-load_dotenv()
 
 
 def parse_args():

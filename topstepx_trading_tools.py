@@ -22,7 +22,8 @@ from calfkit.broker.broker import BrokerClient
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.runners.service import NodesService
-from topstepx_account import TopstepXAccountClient
+from topstepx_account import TopstepXAccountClient, TopstepXPriceStreamer
+from unified_market_connector import FUTURES_PRICE_TOPIC
 
 load_dotenv()
 
@@ -397,7 +398,26 @@ async def main():
         if _practice_account_id is None:
             logger.error("No practice account found. Cannot enable trading.")
             sys.exit(1)
-    
+
+    # Start real-time price streaming via SignalR gateway
+    price_streamer = None
+    jwt_token = os.getenv("TOPSTEPX_JWT_TOKEN", "")
+    stream_symbols_str = os.getenv("TOPSTEPX_STREAM_SYMBOLS", "").strip()
+    if stream_symbols_str:
+        stream_symbols = [s.strip() for s in stream_symbols_str.split(",") if s.strip()]
+    elif _trading_client and _practice_account_id:
+        # Auto-detect symbols from open positions
+        positions = await _trading_client._account_client.get_positions(_practice_account_id)
+        stream_symbols = list({pos.symbol for pos in positions})
+    else:
+        stream_symbols = []
+
+    if jwt_token and stream_symbols:
+        ws_base = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com").replace("api.", "rtc.")
+        price_streamer = TopstepXPriceStreamer(jwt_token, stream_symbols, ws_base=ws_base)
+        await price_streamer.start()
+        logger.info(f"Price streamer started for: {stream_symbols}")
+
     print("=" * 60)
     print("TopstepX Trading Tools Deployment")
     print("=" * 60)
@@ -406,7 +426,15 @@ async def main():
     print(f"\nConnecting to Kafka at {args.bootstrap_servers}...")
     broker = BrokerClient(bootstrap_servers=args.bootstrap_servers)
     service = NodesService(broker)
-    
+
+    # Subscribe to futures price updates from market-connector
+    @broker.subscriber(FUTURES_PRICE_TOPIC, group_id="topstepx-trading-tools")
+    async def handle_futures_price(message: dict) -> None:
+        contract_id = message.get("contract_id")
+        price = message.get("price")
+        if contract_id and price is not None:
+            TopstepXAccountClient.update_market_price(contract_id, float(price))
+
     # Register tools
     print("\nRegistering TopstepX trading tools:")
     tools = [topstepx_buy, topstepx_sell, topstepx_portfolio]
@@ -425,6 +453,8 @@ async def main():
     try:
         await service.run()
     finally:
+        if price_streamer:
+            await price_streamer.stop()
         if _trading_client:
             await _trading_client.close()
 

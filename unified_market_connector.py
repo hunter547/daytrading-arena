@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 PRICE_TOPIC = "market_data.prices"
+FUTURES_PRICE_TOPIC = "market_data.futures_prices"
 
 
 class UnifiedMarketConnector:
@@ -181,6 +182,9 @@ class UnifiedMarketConnector:
         # Build prompt and publish
         asyncio.create_task(self._publish_quote(quote))
 
+        # Publish price update to futures price topic for trading-tools consumption
+        asyncio.create_task(self._publish_price_update(quote))
+
     def _on_trade(self, trade: Trade) -> None:
         """Handle trade update from adapter.
 
@@ -250,6 +254,28 @@ class UnifiedMarketConnector:
 
         except Exception as e:
             logger.error(f"Error publishing quote: {e}")
+
+    async def _publish_price_update(self, quote: Quote) -> None:
+        """Publish a lightweight price update to the futures price topic.
+
+        This is consumed by trading-tools to keep the price cache fresh.
+
+        Args:
+            quote: Quote containing latest price data
+        """
+        try:
+            if not self._broker._connection:
+                await self._broker.start()
+
+            message = {
+                "contract_id": quote.symbol,
+                "price": quote.last_price,
+                "timestamp": quote.timestamp.isoformat(),
+            }
+            await self._broker.publish(message, topic=FUTURES_PRICE_TOPIC)
+            logger.debug(f"Published price update for {quote.symbol}: ${quote.last_price:,.2f}")
+        except Exception as e:
+            logger.error(f"Error publishing price update: {e}")
 
     async def _refresh_candles_loop(self) -> None:
         """Periodically fetch and publish historical candles."""
