@@ -453,6 +453,8 @@ async def main():
     # ── Start web dashboard alongside Kafka service ────────────
     dashboard_port = int(os.getenv("DASHBOARD_PORT", "8080"))
     try:
+        import socket
+
         import uvicorn
         from topstepx_web_dashboard import create_app
 
@@ -461,10 +463,26 @@ async def main():
             get_account_id=lambda: _practice_account_id,
         )
 
+        # Pre-bind socket with SO_REUSEADDR to survive fast container
+        # restarts under host networking. Retry if port is still held.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        for attempt in range(10):
+            try:
+                sock.bind(("0.0.0.0", dashboard_port))
+                break
+            except OSError:
+                logger.info(f"Port {dashboard_port} busy, retrying ({attempt + 1}/10)...")
+                await asyncio.sleep(2)
+        else:
+            logger.error(f"Could not bind to port {dashboard_port} after 10 attempts")
+            sock.close()
+            await service.run()
+            return
+        sock.listen(128)
+
         uvicorn_config = uvicorn.Config(
             dashboard_app,
-            host="0.0.0.0",
-            port=dashboard_port,
             log_level="info",
             access_log=False,
         )
@@ -473,7 +491,7 @@ async def main():
 
         await asyncio.gather(
             service.run(),
-            uvicorn_server.serve(),
+            uvicorn_server.serve(sockets=[sock]),
         )
     except ImportError:
         logger.warning("fastapi/uvicorn not installed — running without web dashboard")
