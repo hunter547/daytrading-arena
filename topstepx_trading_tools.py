@@ -450,7 +450,33 @@ async def main():
     print("  - topstepx_portfolio()")
     print("\nPress Ctrl+C to stop...")
     
+    # ── Start web dashboard alongside Kafka service ────────────
+    dashboard_port = int(os.getenv("DASHBOARD_PORT", "8080"))
     try:
+        import uvicorn
+        from topstepx_web_dashboard import create_app
+
+        dashboard_app = create_app(
+            trading_client=_trading_client,
+            get_account_id=lambda: _practice_account_id,
+        )
+
+        uvicorn_config = uvicorn.Config(
+            dashboard_app,
+            host="0.0.0.0",
+            port=dashboard_port,
+            log_level="info",
+            access_log=False,
+        )
+        uvicorn_server = uvicorn.Server(uvicorn_config)
+        print(f"\n✓ Web dashboard available at http://0.0.0.0:{dashboard_port}")
+
+        await asyncio.gather(
+            service.run(),
+            uvicorn_server.serve(),
+        )
+    except ImportError:
+        logger.warning("fastapi/uvicorn not installed — running without web dashboard")
         await service.run()
     finally:
         if price_streamer:

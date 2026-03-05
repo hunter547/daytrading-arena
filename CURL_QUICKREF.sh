@@ -4,7 +4,7 @@
 # Copy these commands and replace variables as needed
 
 # Set your token
-export TOPSTEPX_JWT_TOKEN="your_token_here"
+export TOPSTEPX_JWT_TOKEN="REDACTED_JWT"
 
 # ============================================================================
 # ACCOUNTS
