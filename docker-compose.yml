@@ -93,6 +93,8 @@ services:
       - SERVICE_NAME=topstepx_trading_tools
       - DASHBOARD_PORT=8080
       - DASHBOARD_VIEW_ONLY=${DASHBOARD_VIEW_ONLY:-true}
+      - AGENT_MODEL=gpt-5-nano
+      - AGENT_STRATEGY=futures
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers kafka:9092

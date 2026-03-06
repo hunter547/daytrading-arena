@@ -38,7 +38,11 @@ _original_model_request_params_init = ModelRequestParameters.__init__
 
 
 def _patched_model_request_params_init(self, **kwargs):
-    """Patched __init__ that forces allow_text_output=False."""
+    """Patched __init__ that forces allow_text_output=False.
+
+    This ensures the LLM always includes tool calls (no text-only responses).
+    Sentiment is inferred from tool call patterns instead.
+    """
     if "allow_text_output" not in kwargs:
         kwargs["allow_text_output"] = False
     _original_model_request_params_init(self, **kwargs)
@@ -48,15 +52,16 @@ ModelRequestParameters.__init__ = _patched_model_request_params_init
 
 # Import TopstepX tools if available
 try:
-    from topstepx_trading_tools import topstepx_buy, topstepx_portfolio, topstepx_sell
+    from topstepx_trading_tools import report_sentiment, topstepx_buy, topstepx_portfolio, topstepx_sell
 
     TOPSTEPX_AVAILABLE = True
 except ImportError:
     TOPSTEPX_AVAILABLE = False
 
 _REASONING_ADDENDUM = (
-    "\n\nAt the end of your response, include a brief 'Reasoning:' section that concisely "
-    "explains what action you took (or chose not to take) and why."
+    "\n\nAfter analyzing the market, always call report_sentiment() with:\n"
+    "- reasoning: 1-2 sentences on what you did and why\n"
+    "- sentiment: bullish | bearish | neutral (based on multi-timeframe price action)"
 )
 
 STRATEGIES: dict[str, str] = {
@@ -150,29 +155,28 @@ STRATEGIES: dict[str, str] = {
         "and your winners should be large (scaled up over time).\n"
         "- Be patient. No trade is better than a bad trade. Waiting costs nothing; "
         "a blown account costs everything.\n\n"
-        "CRITICAL RULE - NO TEXT-ONLY RESPONSES:\n"
-        "Your ONLY way to interact with the account is through ACTUAL FUNCTION CALLS.\n"
-        "DO NOT write text describing function calls. DO NOT explain what you 'would' do.\n"
-        "You MUST call at least one function on EVERY SINGLE response. No exceptions.\n\n"
-        "AVAILABLE TOOLS (call these, don't describe them):\n"
+        "You must call at least one tool function every response. "
+        "You may include brief reasoning text alongside your tool calls.\n\n"
+        "AVAILABLE TOOLS:\n"
         "- topstepx_portfolio(): REQUIRED on every invocation - check positions first\n"
         '- topstepx_buy(contract, quantity): Go LONG (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
         '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MNQ.H26", quantity=1)\n'
-        "- calculator(expression): Calculate P&L, position sizes, etc.\n\n"
+        "- calculator(expression): Calculate P&L, position sizes, etc.\n"
+        '- report_sentiment(reasoning, sentiment): REQUIRED on every invocation - report your '
+        'analysis (reasoning="1-2 sentences", sentiment="bullish"|"bearish"|"neutral")\n\n'
         "CONTRACTS:\n"
         "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point, tickSize=0.25, tickValue=$1.25)\n"
         "- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 ($2/point, tickSize=0.25, tickValue=$0.50)\n\n"
-        "MANDATORY WORKFLOW:\n"
-        "1. ALWAYS start by calling topstepx_portfolio() - do this NOW, not later\n"
-        "2. Check your unrealized PnL. If any position is losing, strongly consider cutting it.\n"
-        "3. If a position is winning AND market momentum confirms, consider scaling in (add 1 contract).\n"
-        "4. Only enter new positions when you see a clear trend/setup with defined risk.\n"
-        "5. If no clear opportunity, stay flat. Patience IS the edge.\n\n"
-        "REMEMBER: \n"
-        "- WRONG: Writing 'I will call topstepx_portfolio()' or explaining your reasoning first\n"
-        "- RIGHT: Actually calling topstepx_portfolio() as your FIRST action in every response\n"
-        "- Your response must include AT LEAST ONE function call, preferably topstepx_portfolio()\n"
-        "- Text explanation can come AFTER function calls, never before or instead of them"
+        "MANDATORY WORKFLOW (follow this exact sequence every invocation):\n"
+        "1. Call topstepx_portfolio() to check current positions and PnL.\n"
+        "2. Analyze the multi-timeframe candle data provided. Decide on action.\n"
+        "3. If any position is losing, strongly consider cutting it.\n"
+        "4. If a position is winning AND momentum confirms, consider scaling in (add 1 contract).\n"
+        "5. Only enter new positions when you see a clear trend/setup with defined risk.\n"
+        "6. If no clear opportunity, stay flat. Patience IS the edge.\n"
+        "7. ALWAYS end by calling report_sentiment() with your reasoning and market outlook.\n\n"
+        "CRITICAL: You MUST call report_sentiment() as your FINAL tool call every single turn. "
+        "This is not optional. Example: report_sentiment(reasoning='Flat, no clear trend on MES 1hr/4hr candles', sentiment='neutral')"
     )
     + _REASONING_ADDENDUM,
 }
@@ -232,7 +236,7 @@ async def main() -> None:
         if not TOPSTEPX_AVAILABLE:
             print("ERROR: TopstepX tools not available for futures strategy")
             sys.exit(1)
-        tools = [topstepx_buy, topstepx_sell, topstepx_portfolio, calculator]  # type: ignore
+        tools = [topstepx_buy, topstepx_sell, topstepx_portfolio, report_sentiment, calculator]  # type: ignore
         print("  ✓ TopstepX tools enabled (futures mode)")
         print("  ✓ allow_text_output=False enforced (monkey-patched)")
         # Standard router - monkey-patch forces allow_text_output=False
