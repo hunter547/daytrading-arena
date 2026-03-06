@@ -47,7 +47,7 @@ async def debug_signalr():
         return
     
     # Use contracts from .env or default to Micro E-mini contracts
-    symbols_env = os.getenv("TOPSTEPX_SYMBOLS", "CON.F.US.MES.H26,CON.F.US.MNQ.H26")
+    symbols_env = os.getenv("TOPSTEPX_SYMBOLS", "CON.F.US.MES.H26")
     symbols = [s.strip() for s in symbols_env.split(",")]
     hub_url = f"https://rtc.topstepx.com/hubs/market?access_token={jwt_token}"
     
