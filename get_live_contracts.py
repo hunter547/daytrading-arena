@@ -45,15 +45,6 @@ async def main():
             if '.ES.' in cid and '.MES.' not in cid:
                 es_contracts.append((cid, name))
         
-        # Find NQ (full-sized E-mini NASDAQ)
-        nq_contracts = []
-        for c in contracts:
-            cid = c.get('id', '')
-            name = c.get('name', '')
-            # Look for .NQ. but not .MNQ. (micro) or .ENQ.
-            if '.NQ.' in cid and '.MNQ.' not in cid and '.ENQ.' not in cid and '.NQG.' not in cid:
-                nq_contracts.append((cid, name))
-        
         print("\n📊 E-MINI S&P 500 (ES) CONTRACTS:")
         print("-" * 80)
         if es_contracts:
@@ -66,31 +57,17 @@ async def main():
                 cid = c.get('id', '')
                 if 'ES' in cid:
                     print(f"     {cid:35s} | {c.get('name', '')}")
-        
-        print("\n📊 E-MINI NASDAQ (NQ) CONTRACTS:")
-        print("-" * 80)
-        if nq_contracts:
-            for cid, name in nq_contracts:
-                print(f"  ✓ {cid:35s} | {name}")
-        else:
-            print("  ❌ No full-sized NQ contracts found")
-            print("\n  Available NQ-related contracts:")
-            for c in contracts:
-                cid = c.get('id', '')
-                if 'NQ' in cid:
-                    print(f"     {cid:35s} | {c.get('name', '')}")
-        
+
         print("\n" + "=" * 80)
         print("💡 TO USE THESE CONTRACTS:")
         print("=" * 80)
-        
-        if es_contracts or nq_contracts:
-            es_id = es_contracts[0][0] if es_contracts else "CON.F.US.MES.H26"
-            nq_id = nq_contracts[0][0] if nq_contracts else "CON.F.US.MNQ.H26"
-            
+
+        if es_contracts:
+            es_id = es_contracts[0][0]
+
             print(f"\n./run.sh python topstepx_tick_viewer.py")
             print(f"\n# Or set in .env:")
-            print(f"TOPSTEPX_SYMBOLS={es_id},{nq_id}")
+            print(f"TOPSTEPX_SYMBOLS={es_id}")
         
         print("\n")
         return 0

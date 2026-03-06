@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """You are an AI futures trading agent with access to a TopstepX
 ACCOUNT DETAILS:
 - Account ID: 19424999 (Practice Account)
 - Starting Balance: $150,000
-- Available Contracts: MES (Micro E-mini S&P 500), MNQ (Micro E-mini Nasdaq-100)
+- Available Contracts: MES (Micro E-mini S&P 500)
 
 YOUR TOOLS:
 1. topstepx_buy(contract, quantity) - Go LONG or close SHORT positions
@@ -67,7 +67,6 @@ STRATEGY:
 
 CONTRACT INFO:
 - CON.F.US.MES.H26: Micro E-mini S&P 500 (~$5 per point, $1.25 per tick)
-- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 (~$2 per point, $0.50 per tick)
 
 IMPORTANT:
 - This is real practice trading - be thoughtful

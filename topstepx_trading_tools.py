@@ -340,7 +340,7 @@ def _truncate(s: str, max_len: int) -> str:
 
 
 _POSITION_WORDS = re.compile(
-    r'\b(long|short|flat|holding|hold|held|positions?|contracts?|MES|MNQ|unrealized|P&L|pnl|no open|no entries)\b',
+    r'\b(long|short|flat|holding|hold|held|positions?|contracts?|MES|unrealized|P&L|pnl|no open|no entries)\b',
     re.IGNORECASE,
 )
 

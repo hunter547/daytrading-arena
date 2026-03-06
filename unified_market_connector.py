@@ -369,29 +369,34 @@ class UnifiedMarketConnector:
             # market data symbols with positions it holds
             _FRIENDLY = {
                 "CON.F.US.MES.H26": "E-mini S&P 500 Micro",
-                "CON.F.US.MNQ.H26": "E-mini Nasdaq-100 Micro",
             }
             friendly = _FRIENDLY.get(symbol, symbol)
             prompt_parts = [
                 f"\n[CHART DATA for {friendly} — this is NOT a position, just price history for analysis]"
             ]
 
+            candles = []  # track last successful fetch for price publish
             for granularity, lookback_mins, offset_mins, description in timeframes:
                 start_time = now - timedelta(minutes=lookback_mins)
                 end_time = now - timedelta(minutes=offset_mins)
 
-                candles = await self._adapter.fetch_candles(
-                    symbol=symbol,
-                    granularity_seconds=granularity,
-                    start_time=start_time,
-                    end_time=end_time,
-                    limit=100,
-                )
+                try:
+                    tf_candles = await self._adapter.fetch_candles(
+                        symbol=symbol,
+                        granularity_seconds=granularity,
+                        start_time=start_time,
+                        end_time=end_time,
+                        limit=100,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to fetch {description} for {symbol}: {e}")
+                    tf_candles = []
 
-                if candles:
+                if tf_candles:
+                    candles = tf_candles  # keep reference for price publish
                     prompt_parts.append(f"\n{description}:")
                     prompt_parts.append("Time,Open,High,Low,Close,Volume")
-                    for candle in candles:
+                    for candle in tf_candles:
                         prompt_parts.append(
                             f"{candle.timestamp.isoformat()},"
                             f"{candle.open},{candle.high},{candle.low},"

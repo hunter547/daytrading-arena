@@ -173,20 +173,18 @@ STRATEGIES: dict[str, str] = {
         "- topstepx_portfolio(): Check positions and PnL. REQUIRED when you have open positions. "
         "When the message says CURRENT POSITIONS: NONE, you are flat — no need to call portfolio.\n"
         '- topstepx_buy(contract, quantity): Go LONG (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
-        '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MNQ.H26", quantity=1)\n'
+        '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
         '- topstepx_close(contract, quantity): CLOSE a position. quantity=0 closes ALL contracts. '
         'ONLY call this when you have confirmed open positions via topstepx_portfolio().\n'
         "- calculator(expression): Calculate P&L, position sizes, etc.\n"
         '- report_sentiment(reasoning, sentiment): REQUIRED every invocation.\n'
         '  reasoning: 1-2 sentences on what you did and why.\n'
         '  sentiment: "bullish", "bearish", or "neutral".\n\n'
-        "CONTRACTS:\n"
+        "CONTRACT:\n"
         "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point, tickSize=0.25, tickValue=$1.25)\n"
-        "- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 ($2/point, tickSize=0.25, tickValue=$0.50)\n\n"
+        "- This is the ONLY contract you trade. Do not reference or trade any other contract.\n\n"
         "NO HEDGING - THIS IS A STRICT TOPSTEP RULE:\n"
-        "- ALL open positions must be in the SAME direction. No mixing longs and shorts.\n"
-        "- If you are LONG MES, you CANNOT go SHORT MNQ (or any other contract). Everything must be long.\n"
-        "- If you are SHORT MNQ, you CANNOT go LONG MES (or any other contract). Everything must be short.\n"
+        "- ALL open positions must be in the SAME direction (all long or all short).\n"
         "- To reverse direction: CLOSE ALL existing positions first with topstepx_close(), then enter in the new direction.\n"
         "- Violating this rule will get the account flagged and potentially terminated.\n\n"
         "CLOSING POSITIONS:\n"
