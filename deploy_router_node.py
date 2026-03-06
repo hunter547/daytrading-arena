@@ -57,8 +57,10 @@ class StatelessHistoryStore(InMemoryMessageHistoryStore):
 
 from trading_tools import calculator, execute_trade, get_portfolio
 
-# allow_text_output defaults to True — LLM can end its turn with text
-# instead of being forced into an infinite tool-call loop
+# allow_text_output=True (default) — LLM can end its turn with text.
+# This prevents infinite tool-call loops when flat/throttled.
+# Dashboard reasoning is ONLY updated from report_sentiment and portfolio
+# tool returns (line 408 raw LLM text path is suppressed).
 
 # Import TopstepX tools if available
 try:

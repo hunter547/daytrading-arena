@@ -31,4 +31,10 @@ for TOPIC in "${TOPICS[@]}"; do
   echo "  Topic: $TOPIC"
 done
 
+# ChatNode topic needs 2 partitions: one for the chatnode consumer, one for
+# the agent router's response listener (both join the same consumer group).
+kafka-topics --bootstrap-server "$BROKER" --create --if-not-exists \
+  --topic "ai_prompted.gpt5-nano" --partitions 2 --replication-factor 1 2>/dev/null
+echo "  Topic: ai_prompted.gpt5-nano (2 partitions)"
+
 echo "All topics created."
