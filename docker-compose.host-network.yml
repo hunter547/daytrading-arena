@@ -9,6 +9,7 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_ADMIN_ENABLE_SERVER: "false"
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "2181"]
       interval: 10s
@@ -85,6 +86,8 @@ services:
       - SERVICE_NAME=topstepx_trading_tools
       - DASHBOARD_PORT=8080
       - DASHBOARD_VIEW_ONLY=${DASHBOARD_VIEW_ONLY:-true}
+      - AGENT_MODEL=gpt-5-nano
+      - AGENT_STRATEGY=futures
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers localhost:9092

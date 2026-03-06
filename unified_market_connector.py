@@ -312,6 +312,8 @@ class UnifiedMarketConnector:
 
             # Fetch multiple timeframes (similar to original implementation)
             timeframes = [
+                (14400, 2880, 480, "4-hour candles (48h ago -> 8h ago)"),
+                (3600, 720, 120, "1-hour candles (12h ago -> 2h ago)"),
                 (900, 180, 90, "15-min candles (3h ago -> 90min ago)"),
                 (300, 90, 20, "5-min candles (90min ago -> 20min ago)"),
                 (60, 20, 0, "1-min candles (last 20 minutes)"),

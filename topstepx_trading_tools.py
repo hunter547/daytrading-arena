@@ -10,15 +10,26 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import re
 import sys
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
 from dotenv import load_dotenv
 
+from calfkit._vendor.pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from calfkit.broker.broker import BrokerClient
+from calfkit.models.event_envelope import EventEnvelope
 from calfkit.models.tool_context import ToolContext
 from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.runners.service import NodesService
@@ -208,6 +219,145 @@ async def _ensure_practice_account():
     return _practice_account_id
 
 
+# ── Agent activity state ─────────────────────────────────────────
+
+BULLISH_KEYWORDS = {"bullish", "upward", "scaling in", "buy", "long", "momentum"}
+BEARISH_KEYWORDS = {"bearish", "downward", "cutting", "sell", "short", "risk off"}
+NEUTRAL_KEYWORDS = {"flat", "wait", "no clear", "patience"}
+
+_agent_state: dict = {
+    "agent_name": None,
+    "model": os.getenv("AGENT_MODEL", ""),
+    "strategy": os.getenv("AGENT_STRATEGY", ""),
+    "sentiment": "neutral",
+    "last_active": None,
+    "latest_reasoning": None,
+    "activity": [],  # last ~10 events
+}
+_agent_activity: deque = deque(maxlen=10)
+_agent_seen: set = set()
+
+
+def _extract_sentiment(text: str) -> str:
+    """Three-tier sentiment extraction.
+
+    1. Explicit tag (highest priority): ``Sentiment: bullish|bearish|neutral``
+    2. Keyword scan (fallback): count bullish/bearish keywords
+    3. Returns "neutral" if nothing matches
+    """
+    # Tier 1: explicit tag
+    match = re.search(r"(?i)sentiment:\s*(bullish|bearish|neutral)", text)
+    if match:
+        return match.group(1).lower()
+
+    # Tier 2: keyword scan
+    lower = text.lower()
+    bull = sum(1 for kw in BULLISH_KEYWORDS if kw in lower)
+    bear = sum(1 for kw in BEARISH_KEYWORDS if kw in lower)
+    if bull > bear:
+        return "bullish"
+    if bear > bull:
+        return "bearish"
+    return "neutral"
+
+
+def _infer_sentiment_from_tool_calls(tool_calls: list) -> str:
+    """Tier 3: infer sentiment from recent tool call names."""
+    names = [tc.tool_name for tc in tool_calls]
+    has_buy = any("buy" in n.lower() for n in names)
+    has_sell = any("sell" in n.lower() for n in names)
+    if has_buy and not has_sell:
+        return "bullish"
+    if has_sell and not has_buy:
+        return "bearish"
+    return "neutral"
+
+
+def _truncate(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "\u2026"
+
+
+def _format_tool_call(part: ToolCallPart) -> str:
+    try:
+        args = part.args_as_dict()
+    except Exception:
+        args = {}
+    if args:
+        params = ", ".join(f"{k}={_truncate(json.dumps(v), 80)}" for k, v in args.items())
+        return f"{part.tool_name}({params})"
+    return f"{part.tool_name}()"
+
+
+def _process_agent_envelope(envelope: EventEnvelope) -> None:
+    """Parse an EventEnvelope and update _agent_state."""
+    agent_name = envelope.agent_name or "unknown"
+    trace_id = envelope.trace_id
+    history_len = len(envelope.message_history) + len(envelope.uncommitted_messages)
+
+    # Dedup
+    if trace_id:
+        key = (trace_id, history_len)
+        if key in _agent_seen:
+            return
+        _agent_seen.add(key)
+        # Prevent unbounded growth
+        if len(_agent_seen) > 500:
+            _agent_seen.clear()
+
+    # Check both uncommitted messages (newest) and latest in history
+    messages_to_check = list(envelope.uncommitted_messages)
+    if envelope.latest_message_in_history is not None:
+        messages_to_check.append(envelope.latest_message_in_history)
+
+    if not messages_to_check:
+        return
+
+    now = datetime.now().strftime("%H:%M:%S")
+    _agent_state["agent_name"] = agent_name
+    _agent_state["last_active"] = datetime.now().isoformat()
+
+    for msg in messages_to_check:
+        if isinstance(msg, ModelResponse):
+            tool_calls = [p for p in msg.parts if isinstance(p, ToolCallPart)]
+            text_parts = [p.content for p in msg.parts if isinstance(p, TextPart)]
+
+            if tool_calls:
+                lines = [_format_tool_call(tc) for tc in tool_calls]
+                _agent_activity.append({"time": now, "kind": "TOOL CALL", "details": "\n".join(lines)})
+            if text_parts:
+                text = " ".join(text_parts)
+                _agent_state["latest_reasoning"] = text
+                sentiment = _extract_sentiment(text)
+                _agent_state["sentiment"] = sentiment
+                logger.info(f"Sentiment extracted from text: {sentiment} | Reasoning: {_truncate(text, 150)}")
+                if not tool_calls:
+                    _agent_activity.append({"time": now, "kind": "RESPONSE", "details": _truncate(text, 300)})
+            elif tool_calls:
+                # Tier 3: no text at all — infer sentiment from tool calls
+                sentiment = _infer_sentiment_from_tool_calls(tool_calls)
+                _agent_state["sentiment"] = sentiment
+                tool_names = ", ".join(tc.tool_name for tc in tool_calls)
+                logger.info(f"Sentiment inferred from tool calls: {sentiment} | Tools: {tool_names}")
+
+        elif isinstance(msg, ModelRequest):
+            tool_returns = [p for p in msg.parts if isinstance(p, ToolReturnPart)]
+            if tool_returns:
+                lines = [
+                    f"{tr.tool_name} -> {_truncate(tr.model_response_str(), 200)}"
+                    for tr in tool_returns
+                ]
+                _agent_activity.append({"time": now, "kind": "TOOL RESULT", "details": "\n".join(lines)})
+
+    _agent_state["activity"] = list(_agent_activity)
+
+
+def get_agent_state() -> dict:
+    """Return a copy of the current agent state for the dashboard."""
+    return dict(_agent_state)
+
+
 # ── Agent Tools ──────────────────────────────────────────────────
 
 
@@ -313,6 +463,35 @@ async def topstepx_sell(
         error = result.get("error", "Unknown error")
         logger.error(f"❌ SELL ORDER FAILED: {quantity}x {contract} | Error: {error}")
         return f"❌ Order failed: {error}"
+
+
+@agent_tool
+async def report_sentiment(
+    ctx: ToolContext,
+    reasoning: str,
+    sentiment: str,
+) -> str:
+    """Report your current market reasoning and sentiment assessment.
+
+    Call this EVERY response to share your analysis.
+
+    Args:
+        reasoning: 1-2 sentences explaining what you did (or chose not to do) and why.
+        sentiment: Your market outlook: "bullish", "bearish", or "neutral".
+
+    Returns:
+        Confirmation message
+    """
+    sentiment_lower = sentiment.strip().lower()
+    if sentiment_lower not in ("bullish", "bearish", "neutral"):
+        sentiment_lower = "neutral"
+
+    _agent_state["latest_reasoning"] = reasoning
+    _agent_state["sentiment"] = sentiment_lower
+    _agent_state["last_active"] = datetime.now().isoformat()
+    logger.info(f"Sentiment reported via tool: {sentiment_lower} | Reasoning: {_truncate(reasoning, 150)}")
+
+    return f"Recorded sentiment: {sentiment_lower}"
 
 
 @agent_tool
@@ -435,9 +614,14 @@ async def main():
         if contract_id and price is not None:
             TopstepXAccountClient.update_market_price(contract_id, float(price))
 
+    # Subscribe to agent output for dashboard activity panel
+    @broker.subscriber("agent_router.output", group_id="dashboard-agent-viewer")
+    async def handle_agent_output(envelope: EventEnvelope) -> None:
+        _process_agent_envelope(envelope)
+
     # Register tools
     print("\nRegistering TopstepX trading tools:")
-    tools = [topstepx_buy, topstepx_sell, topstepx_portfolio]
+    tools = [topstepx_buy, topstepx_sell, topstepx_portfolio, report_sentiment]
     for tool in tools:
         service.register_node(tool)
         print(f"  ✓ {tool.tool_schema.name} - {tool.tool_schema.description}")
@@ -461,6 +645,7 @@ async def main():
         dashboard_app = create_app(
             trading_client=_trading_client,
             get_account_id=lambda: _practice_account_id,
+            get_agent_state=get_agent_state,
         )
 
         # Pre-bind socket with SO_REUSEADDR to survive fast container

@@ -30,12 +30,14 @@ STATIC_DIR = Path(__file__).parent / "static"
 def create_app(
     trading_client,
     get_account_id: Callable[[], Optional[int]],
+    get_agent_state: Optional[Callable[[], dict]] = None,
 ) -> FastAPI:
     """Create FastAPI app with shared trading state.
 
     Args:
         trading_client: TopstepXTradingClient instance (shared with Kafka workers)
         get_account_id: Callable returning the current practice account ID
+        get_agent_state: Optional callable returning current agent activity state
     """
     app = FastAPI(title="TopstepX Dashboard", docs_url=None, redoc_url=None)
 
@@ -79,6 +81,12 @@ def create_app(
     @app.get("/api/prices")
     async def api_prices():
         return dict(TopstepXAccountClient._current_prices)
+
+    @app.get("/api/agent")
+    async def api_agent():
+        if get_agent_state:
+            return get_agent_state()
+        return {}
 
     @app.post("/api/buy")
     async def api_buy(
@@ -170,6 +178,8 @@ def create_app(
         try:
             while True:
                 data = await _get_portfolio()
+                if get_agent_state:
+                    data["agent"] = get_agent_state()
                 await ws.send_json(data)
                 await asyncio.sleep(2)
         except WebSocketDisconnect:
