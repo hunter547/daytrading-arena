@@ -323,8 +323,17 @@ class UnifiedMarketConnector:
         except Exception as e:
             logger.error(f"Error publishing price update: {e}")
 
+    def _has_open_positions(self) -> bool:
+        """Check if portfolio cache indicates open positions."""
+        line = self._cached_portfolio_line
+        return bool(line) and "NONE" not in line and "CURRENT POSITIONS:" in line
+
     async def _refresh_candles_loop(self) -> None:
-        """Periodically fetch and publish historical candles."""
+        """Periodically fetch and publish historical candles.
+
+        When positions are open, loops immediately (no sleep) so the LLM
+        can monitor and manage the trade in real time.
+        """
         from datetime import timedelta
 
         logger.info(
@@ -333,7 +342,14 @@ class UnifiedMarketConnector:
 
         while self._running:
             try:
-                await asyncio.sleep(self._candle_interval)
+                # Refresh portfolio cache before deciding sleep duration
+                await self._get_portfolio_line()
+
+                if self._has_open_positions():
+                    # In a trade — no delay, loop immediately
+                    pass
+                else:
+                    await asyncio.sleep(self._candle_interval)
 
                 if not self._running:
                     break
@@ -356,14 +372,21 @@ class UnifiedMarketConnector:
         try:
             now = datetime.now(timezone.utc)
 
-            # Fetch multiple timeframes (similar to original implementation)
-            timeframes = [
-                (14400, 2880, 480, "4-hour candles (48h ago -> 8h ago)"),
-                (3600, 720, 120, "1-hour candles (12h ago -> 2h ago)"),
-                (900, 180, 90, "15-min candles (3h ago -> 90min ago)"),
-                (300, 90, 20, "5-min candles (90min ago -> 20min ago)"),
-                (60, 20, 0, "1-min candles (last 20 minutes)"),
-            ]
+            # When in a trade, skip slow timeframes — only need short-term data
+            if self._has_open_positions():
+                timeframes = [
+                    (900, 180, 90, "15-min candles (3h ago -> 90min ago)"),
+                    (300, 90, 20, "5-min candles (90min ago -> 20min ago)"),
+                    (60, 20, 0, "1-min candles (last 20 minutes)"),
+                ]
+            else:
+                timeframes = [
+                    (14400, 2880, 480, "4-hour candles (48h ago -> 8h ago)"),
+                    (3600, 720, 120, "1-hour candles (12h ago -> 2h ago)"),
+                    (900, 180, 90, "15-min candles (3h ago -> 90min ago)"),
+                    (300, 90, 20, "5-min candles (90min ago -> 20min ago)"),
+                    (60, 20, 0, "1-min candles (last 20 minutes)"),
+                ]
 
             # Map contract IDs to friendly names so LLM doesn't confuse
             # market data symbols with positions it holds
@@ -375,13 +398,12 @@ class UnifiedMarketConnector:
                 f"\n[CHART DATA for {friendly} — this is NOT a position, just price history for analysis]"
             ]
 
-            candles = []  # track last successful fetch for price publish
-            for granularity, lookback_mins, offset_mins, description in timeframes:
+            # Fetch all timeframes in parallel
+            async def _fetch_one(granularity, lookback_mins, offset_mins, description):
                 start_time = now - timedelta(minutes=lookback_mins)
                 end_time = now - timedelta(minutes=offset_mins)
-
                 try:
-                    tf_candles = await self._adapter.fetch_candles(
+                    return description, await self._adapter.fetch_candles(
                         symbol=symbol,
                         granularity_seconds=granularity,
                         start_time=start_time,
@@ -390,10 +412,16 @@ class UnifiedMarketConnector:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to fetch {description} for {symbol}: {e}")
-                    tf_candles = []
+                    return description, []
 
+            results = await asyncio.gather(
+                *[_fetch_one(g, lb, off, desc) for g, lb, off, desc in timeframes]
+            )
+
+            candles = []  # track last successful fetch for price publish
+            for description, tf_candles in results:
                 if tf_candles:
-                    candles = tf_candles  # keep reference for price publish
+                    candles = tf_candles
                     prompt_parts.append(f"\n{description}:")
                     prompt_parts.append("Time,Open,High,Low,Close,Volume")
                     for candle in tf_candles:
