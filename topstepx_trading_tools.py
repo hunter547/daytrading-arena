@@ -405,7 +405,9 @@ def _process_agent_envelope(envelope: EventEnvelope) -> None:
                 _agent_activity.append({"time": now, "kind": "TOOL CALL", "details": "\n".join(lines)})
             if text_parts:
                 text = " ".join(text_parts)
-                _agent_state["latest_reasoning"] = _filter_position_hallucinations(text)
+                # Do NOT update latest_reasoning from raw LLM text — it hallucinates
+                # positions. Dashboard reasoning is only set by report_sentiment and
+                # portfolio tool returns (ground-truth paths).
                 sentiment = _extract_sentiment(text)
                 _agent_state["sentiment"] = sentiment
                 logger.info(f"Sentiment extracted from text: {sentiment} | Reasoning: {_truncate(text, 150)}")
