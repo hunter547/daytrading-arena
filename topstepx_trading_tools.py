@@ -144,35 +144,93 @@ class TopstepXTradingClient:
                 "error": str(e),
             }
     
+    async def close_position(self, account_id: int, contract_id: str) -> dict:
+        """Close an entire position for a contract.
+
+        Uses POST /api/Position/closeContract.
+        """
+        url = f"{self._api_base}/api/Position/closeContract"
+        payload = {"accountId": account_id, "contractId": contract_id}
+        logger.info(f"Closing full position: {payload}")
+        try:
+            response = await self._http_client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("success"):
+                error_msg = data.get("errorMessage", "Unknown error")
+                logger.error(f"Close failed: {error_msg}")
+                return {"success": False, "error": error_msg}
+            logger.info(f"Position closed: {contract_id}")
+            return data
+        except Exception as e:
+            logger.error(f"Error closing position: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def partial_close_position(self, account_id: int, contract_id: str, size: int) -> dict:
+        """Partially close a position for a contract.
+
+        Uses POST /api/Position/partialCloseContract.
+        """
+        url = f"{self._api_base}/api/Position/partialCloseContract"
+        payload = {"accountId": account_id, "contractId": contract_id, "size": size}
+        logger.info(f"Partial close position: {payload}")
+        try:
+            response = await self._http_client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("success"):
+                error_msg = data.get("errorMessage", "Unknown error")
+                logger.error(f"Partial close failed: {error_msg}")
+                return {"success": False, "error": error_msg}
+            logger.info(f"Partial close: {size}x {contract_id}")
+            return data
+        except Exception as e:
+            logger.error(f"Error partial closing position: {e}")
+            return {"success": False, "error": str(e)}
+
     async def get_account_summary(self, account_id: int) -> dict:
         """Get account summary with positions.
-        
+
         Args:
             account_id: Account ID to query
-            
+
         Returns:
             Account summary dictionary
         """
         accounts = await self._account_client.get_accounts()
+        # Try the requested account first, then fall back to any practice account
+        # (handles account reset where ID changes)
+        target = None
         for account in accounts:
             if str(account.account_id) == str(account_id):
-                return {
-                    "accountId": account.account_id,
-                    "name": account.name,
-                    "equity": account.equity,
-                    "balance": account.balance,
-                    "positions": [
-                        {
-                            "symbol": pos.symbol,
-                            "quantity": pos.quantity,
-                            "avgPrice": pos.avg_price,
-                            "marketValue": pos.market_value,
-                            "unrealizedPnL": pos.unrealized_pnl,
-                        }
-                        for pos in account.positions
-                    ],
+                target = account
+                break
+        if target is None:
+            # Account ID is stale (e.g. practice account was reset)
+            for account in accounts:
+                if "PRAC" in account.name:
+                    target = account
+                    logger.info(f"Account {account_id} not found, using {account.account_id} ({account.name})")
+                    break
+        if target is None:
+            return {"error": f"Account {account_id} not found"}
+        return {
+            "accountId": target.account_id,
+            "name": target.name,
+            "equity": target.equity,
+            "balance": target.balance,
+            "canTrade": target.can_trade,
+            "positions": [
+                {
+                    "symbol": pos.symbol,
+                    "quantity": pos.quantity,
+                    "avgPrice": pos.avg_price,
+                    "marketValue": pos.market_value,
+                    "unrealizedPnL": pos.unrealized_pnl,
                 }
-        return {"error": f"Account {account_id} not found"}
+                for pos in target.positions
+            ],
+        }
     
     async def close(self):
         """Close HTTP client."""
@@ -202,20 +260,22 @@ def _init_client():
     logger.info("TopstepX trading client initialized")
 
 
-async def _ensure_practice_account():
-    """Ensure practice account ID is loaded."""
+async def _ensure_practice_account(force_refresh: bool = False):
+    """Ensure practice account ID is loaded (re-fetches if stale or forced)."""
     global _practice_account_id
-    
+
     if _trading_client is None:
         return None
-    
-    if _practice_account_id is None:
-        _practice_account_id = await _trading_client.get_practice_account_id()
-        if _practice_account_id:
-            logger.info(f"Practice account ID: {_practice_account_id}")
+
+    if _practice_account_id is None or force_refresh:
+        new_id = await _trading_client.get_practice_account_id()
+        if new_id:
+            if new_id != _practice_account_id:
+                logger.info(f"Practice account ID updated: {_practice_account_id} -> {new_id}")
+            _practice_account_id = new_id
         else:
             logger.warning("No practice account found")
-    
+
     return _practice_account_id
 
 
@@ -226,7 +286,7 @@ BEARISH_KEYWORDS = {"bearish", "downward", "cutting", "sell", "short", "risk off
 NEUTRAL_KEYWORDS = {"flat", "wait", "no clear", "patience"}
 
 _agent_state: dict = {
-    "agent_name": None,
+    "agent_name": os.getenv("AGENT_NAME", ""),
     "model": os.getenv("AGENT_MODEL", ""),
     "strategy": os.getenv("AGENT_STRATEGY", ""),
     "sentiment": "neutral",
@@ -387,7 +447,17 @@ async def topstepx_buy(
     
     if quantity <= 0:
         return "❌ Quantity must be positive"
-    
+
+    # Hedging guard: reject buy if ANY open position is SHORT
+    positions = await _trading_client._account_client.get_positions(account_id)
+    for pos in positions:
+        if pos.quantity < 0:
+            return (
+                f"❌ BLOCKED: You have a SHORT position ({abs(int(pos.quantity))}x {pos.symbol}). "
+                f"Cannot place a BUY order while short. Use topstepx_close() to close "
+                f"your short position first, then enter a new long."
+            )
+
     # Place market buy order
     logger.info(f"🔵 EXECUTING BUY ORDER: {quantity}x {contract}")
     result = await _trading_client.place_market_order(
@@ -439,7 +509,17 @@ async def topstepx_sell(
     
     if quantity <= 0:
         return "❌ Quantity must be positive"
-    
+
+    # Hedging guard: reject sell if ANY open position is LONG
+    positions = await _trading_client._account_client.get_positions(account_id)
+    for pos in positions:
+        if pos.quantity > 0:
+            return (
+                f"❌ BLOCKED: You have a LONG position ({int(pos.quantity)}x {pos.symbol}). "
+                f"Cannot place a SELL order while long. Use topstepx_close() to close "
+                f"your long position first, then enter a new short."
+            )
+
     # Place market sell order
     logger.info(f"🔴 EXECUTING SELL ORDER: {quantity}x {contract}")
     result = await _trading_client.place_market_order(
@@ -463,6 +543,85 @@ async def topstepx_sell(
         error = result.get("error", "Unknown error")
         logger.error(f"❌ SELL ORDER FAILED: {quantity}x {contract} | Error: {error}")
         return f"❌ Order failed: {error}"
+
+
+@agent_tool
+async def topstepx_close(
+    ctx: ToolContext,
+    contract: str,
+    quantity: int = 0,
+) -> str:
+    """Close (or partially close) an open position. USE THIS to take profit or cut losses.
+
+    If quantity is 0 or >= position size, closes the ENTIRE position.
+    If quantity is < position size, partially closes that many contracts.
+
+    Args:
+        contract: Contract ID (e.g., "CON.F.US.MES.H26")
+        quantity: Number of contracts to close. 0 = close all.
+
+    Returns:
+        Result message
+    """
+    _init_client()
+
+    if _trading_client is None:
+        return "❌ TopstepX trading not available"
+
+    account_id = await _ensure_practice_account()
+    if account_id is None:
+        return "❌ No practice account found"
+
+    # Look up the current position
+    positions = await _trading_client._account_client.get_positions(account_id)
+    target = None
+    for pos in positions:
+        if pos.symbol == contract:
+            target = pos
+            break
+
+    if target is None:
+        return f"❌ No open position for {contract}"
+
+    pos_size = abs(int(target.quantity))
+    if pos_size == 0:
+        return f"❌ Position size is zero for {contract}"
+
+    close_qty = quantity if quantity > 0 else pos_size
+
+    if close_qty >= pos_size:
+        # Full close
+        logger.info(f"🔶 CLOSING FULL POSITION: {pos_size}x {contract}")
+        result = await _trading_client.close_position(account_id, contract)
+        if result.get("success"):
+            logger.info(f"✅ POSITION CLOSED: {pos_size}x {contract}")
+            return (
+                f"✓ Position CLOSED\n"
+                f"  Contract: {contract}\n"
+                f"  Quantity closed: {pos_size}\n"
+                f"  Account: {account_id}"
+            )
+        else:
+            error = result.get("error", "Unknown error")
+            logger.error(f"❌ CLOSE FAILED: {contract} | Error: {error}")
+            return f"❌ Close failed: {error}"
+    else:
+        # Partial close
+        logger.info(f"🔶 PARTIAL CLOSE: {close_qty}/{pos_size}x {contract}")
+        result = await _trading_client.partial_close_position(account_id, contract, close_qty)
+        if result.get("success"):
+            logger.info(f"✅ PARTIAL CLOSE: {close_qty}x {contract} (remaining: {pos_size - close_qty})")
+            return (
+                f"✓ Position PARTIALLY CLOSED\n"
+                f"  Contract: {contract}\n"
+                f"  Quantity closed: {close_qty}\n"
+                f"  Remaining: {pos_size - close_qty}\n"
+                f"  Account: {account_id}"
+            )
+        else:
+            error = result.get("error", "Unknown error")
+            logger.error(f"❌ PARTIAL CLOSE FAILED: {contract} | Error: {error}")
+            return f"❌ Partial close failed: {error}"
 
 
 @agent_tool
@@ -562,14 +721,31 @@ async def main():
     )
     args = parser.parse_args()
     
-    # Check for JWT token
+    # Authenticate: use existing JWT or obtain one from username + API key
     if not os.getenv("TOPSTEPX_JWT_TOKEN"):
-        logger.error(
-            "TOPSTEPX_JWT_TOKEN not set. Please set it in .env file.\n"
-            "Run: python topstepx_auth.py to get a token"
-        )
-        sys.exit(1)
-    
+        username = os.getenv("TOPSTEPX_USERNAME")
+        api_key = os.getenv("TOPSTEPX_API_KEY")
+        if username and api_key:
+            from topstepx_auth import authenticate_topstepx
+            logger.info("No JWT token found, authenticating with API key...")
+            jwt_token = await authenticate_topstepx(
+                username, api_key,
+                os.getenv("TOPSTEPX_ENVIRONMENT", "demo"),
+                os.getenv("TOPSTEPX_API_URL"),
+            )
+            if not jwt_token:
+                logger.error("Authentication with API key failed")
+                sys.exit(1)
+            os.environ["TOPSTEPX_JWT_TOKEN"] = jwt_token
+            logger.info("Authenticated successfully — JWT token obtained")
+        else:
+            logger.error(
+                "TopstepX authentication required. Either:\n"
+                "  1. Set TOPSTEPX_JWT_TOKEN, OR\n"
+                "  2. Set TOPSTEPX_USERNAME and TOPSTEPX_API_KEY"
+            )
+            sys.exit(1)
+
     # Initialize client
     _init_client()
     if _trading_client:
@@ -593,7 +769,11 @@ async def main():
 
     if jwt_token and stream_symbols:
         ws_base = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com").replace("api.", "rtc.")
-        price_streamer = TopstepXPriceStreamer(jwt_token, stream_symbols, ws_base=ws_base)
+        price_streamer = TopstepXPriceStreamer(
+            jwt_token, stream_symbols, ws_base=ws_base,
+            account_client=_trading_client._account_client if _trading_client else None,
+            account_id=_practice_account_id,
+        )
         await price_streamer.start()
         logger.info(f"Price streamer started for: {stream_symbols}")
 
@@ -621,7 +801,7 @@ async def main():
 
     # Register tools
     print("\nRegistering TopstepX trading tools:")
-    tools = [topstepx_buy, topstepx_sell, topstepx_portfolio, report_sentiment]
+    tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, report_sentiment]
     for tool in tools:
         service.register_node(tool)
         print(f"  ✓ {tool.tool_schema.name} - {tool.tool_schema.description}")
@@ -642,10 +822,17 @@ async def main():
         import uvicorn
         from topstepx_web_dashboard import create_app
 
+        def _set_account_id(new_id: int):
+            global _practice_account_id
+            if new_id != _practice_account_id:
+                logger.info(f"Account ID refreshed: {_practice_account_id} -> {new_id}")
+                _practice_account_id = new_id
+
         dashboard_app = create_app(
             trading_client=_trading_client,
             get_account_id=lambda: _practice_account_id,
             get_agent_state=get_agent_state,
+            set_account_id=_set_account_id,
         )
 
         # Pre-bind socket with SO_REUSEADDR to survive fast container
@@ -670,6 +857,8 @@ async def main():
             dashboard_app,
             log_level="info",
             access_log=False,
+            ws_ping_interval=20,
+            ws_ping_timeout=60,
         )
         uvicorn_server = uvicorn.Server(uvicorn_config)
         print(f"\n✓ Web dashboard available at http://0.0.0.0:{dashboard_port}")

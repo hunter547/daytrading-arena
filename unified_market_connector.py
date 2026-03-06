@@ -343,6 +343,19 @@ class UnifiedMarketConnector:
                             f"{candle.close},{candle.volume}"
                         )
 
+            # Publish latest candle close price for live dashboard PnL
+            if candles:
+                latest_price = candles[-1].close
+                try:
+                    if not self._broker._connection:
+                        await self._broker.start()
+                    await self._broker.publish(
+                        {"contract_id": symbol, "price": latest_price, "timestamp": now.isoformat()},
+                        topic=FUTURES_PRICE_TOPIC,
+                    )
+                except Exception as e:
+                    logger.debug(f"Error publishing candle price: {e}")
+
             # Get latest quote for this symbol
             quote = self._latest_quotes.get(symbol)
             if quote:

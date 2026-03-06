@@ -38,6 +38,19 @@ services:
       timeout: 10s
       retries: 5
 
+  # 2b. Topic Initialization (one-shot)
+  init-topics:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: futures-init-topics
+    network_mode: host
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./create-topics.sh:/create-topics.sh
+    command: ["bash", "/create-topics.sh"]
+    restart: "no"
+
   # 3. Market Data Connector (TopstepX → Kafka)
   market-connector:
     build:
@@ -48,13 +61,13 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      init-topics:
+        condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
-      - TOPSTEPX_JWT_TOKEN=${TOPSTEPX_JWT_TOKEN}
       - TOPSTEPX_ENVIRONMENT=${TOPSTEPX_ENVIRONMENT:-demo}
-      - TOPSTEPX_ACCOUNT_IDS=${TOPSTEPX_ACCOUNT_IDS:-}
       - SERVICE_NAME=unified_market_connector
     command: >
       python unified_market_connector.py
@@ -76,18 +89,20 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      init-topics:
+        condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
-      - TOPSTEPX_JWT_TOKEN=${TOPSTEPX_JWT_TOKEN}
       - TOPSTEPX_ENVIRONMENT=${TOPSTEPX_ENVIRONMENT:-demo}
-      - TOPSTEPX_ACCOUNT_IDS=${TOPSTEPX_ACCOUNT_IDS:-}
       - SERVICE_NAME=topstepx_trading_tools
       - DASHBOARD_PORT=8080
       - DASHBOARD_VIEW_ONLY=${DASHBOARD_VIEW_ONLY:-true}
+      - AGENT_NAME=futures-trader
       - AGENT_MODEL=gpt-5-nano
       - AGENT_STRATEGY=futures
+      - TOPSTEPX_STREAM_SYMBOLS=CON.F.US.MES.H26,CON.F.US.MNQ.H26
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers localhost:9092
@@ -109,9 +124,7 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
-      - TOPSTEPX_JWT_TOKEN=${TOPSTEPX_JWT_TOKEN}
       - TOPSTEPX_ENVIRONMENT=${TOPSTEPX_ENVIRONMENT:-demo}
-      - TOPSTEPX_ACCOUNT_IDS=${TOPSTEPX_ACCOUNT_IDS:-}
       - SERVICE_NAME=tools_and_dashboard
     command: >
       python tools_and_dashboard.py
