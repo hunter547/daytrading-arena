@@ -526,8 +526,21 @@ function updateAgent(agent) {
     $('agentLastActive').textContent = 'Waiting for first activity...';
   }
 
-  // Reasoning
-  $('agentReasoning').textContent = agent.latest_reasoning || 'No reasoning yet';
+  // Reasoning — split ground-truth prefix from LLM text
+  const raw = agent.latest_reasoning || 'No reasoning yet';
+  const prefixMatch = raw.match(/^\[(.+?)\]\s*(.*)/s);
+  if (prefixMatch) {
+    const badge = document.createElement('div');
+    badge.style.cssText = 'font-weight:bold;margin-bottom:6px;color:var(--blue);';
+    badge.textContent = prefixMatch[1];
+    const text = document.createElement('div');
+    text.textContent = prefixMatch[2];
+    $('agentReasoning').innerHTML = '';
+    $('agentReasoning').appendChild(badge);
+    $('agentReasoning').appendChild(text);
+  } else {
+    $('agentReasoning').textContent = raw;
+  }
 
   // Activity feed
   const feed = $('activityFeed');

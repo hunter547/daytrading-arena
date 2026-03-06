@@ -30,25 +30,35 @@ from calfkit.nodes.chat_node import ChatNode
 from calfkit.runners.service import NodesService
 from calfkit.stores.in_memory import InMemoryMessageHistoryStore
 
+
+class StatelessHistoryStore(InMemoryMessageHistoryStore):
+    """History store that wipes previous history at the start of each new invocation.
+
+    Each agent invocation starts with a UserPromptPart / TextPart in a ModelRequest.
+    When we detect that, we clear all prior messages so the LLM has zero stale context.
+    Within a single invocation, tool call/result round-trips are preserved normally.
+    """
+
+    async def append(self, thread_id, message, scope=None):
+        from calfkit._vendor.pydantic_ai.messages import ModelRequest, UserPromptPart
+        # Detect start of new invocation: ModelRequest containing user prompt
+        if isinstance(message, ModelRequest):
+            has_user_prompt = any(
+                isinstance(p, UserPromptPart) for p in message.parts
+            )
+            if has_user_prompt:
+                # Wipe all prior history — start fresh
+                self._messages[thread_id] = []
+        await super().append(thread_id, message, scope)
+
+    async def append_many(self, thread_id, messages, scope=None):
+        for msg in messages:
+            await self.append(thread_id, msg, scope)
+
 from trading_tools import calculator, execute_trade, get_portfolio
 
-# Monkey-patch ModelRequestParameters to force allow_text_output=False by default
-# This ensures all instances created by AgentRouterNode will have the correct value
-_original_model_request_params_init = ModelRequestParameters.__init__
-
-
-def _patched_model_request_params_init(self, **kwargs):
-    """Patched __init__ that forces allow_text_output=False.
-
-    This ensures the LLM always includes tool calls (no text-only responses).
-    Sentiment is inferred from tool call patterns instead.
-    """
-    if "allow_text_output" not in kwargs:
-        kwargs["allow_text_output"] = False
-    _original_model_request_params_init(self, **kwargs)
-
-
-ModelRequestParameters.__init__ = _patched_model_request_params_init
+# allow_text_output defaults to True — LLM can end its turn with text
+# instead of being forced into an infinite tool-call loop
 
 # Import TopstepX tools if available
 try:
@@ -158,14 +168,16 @@ STRATEGIES: dict[str, str] = {
         "You must call at least one tool function every response. "
         "You may include brief reasoning text alongside your tool calls.\n\n"
         "AVAILABLE TOOLS:\n"
-        "- topstepx_portfolio(): REQUIRED on every invocation - check positions first\n"
+        "- topstepx_portfolio(): Check positions and PnL. REQUIRED when you have open positions. "
+        "When the message says CURRENT POSITIONS: NONE, you are flat — no need to call portfolio.\n"
         '- topstepx_buy(contract, quantity): Go LONG (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
         '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MNQ.H26", quantity=1)\n'
         '- topstepx_close(contract, quantity): CLOSE a position. quantity=0 closes ALL contracts. '
-        'Use this to take profit or cut losses.\n'
+        'ONLY call this when you have confirmed open positions via topstepx_portfolio().\n'
         "- calculator(expression): Calculate P&L, position sizes, etc.\n"
-        '- report_sentiment(reasoning, sentiment): REQUIRED on every invocation - report your '
-        'analysis (reasoning="1-2 sentences", sentiment="bullish"|"bearish"|"neutral")\n\n'
+        '- report_sentiment(reasoning, sentiment): REQUIRED every invocation.\n'
+        '  reasoning: 1-2 sentences on what you did and why.\n'
+        '  sentiment: "bullish", "bearish", or "neutral".\n\n'
         "CONTRACTS:\n"
         "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point, tickSize=0.25, tickValue=$1.25)\n"
         "- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 ($2/point, tickSize=0.25, tickValue=$0.50)\n\n"
@@ -190,17 +202,30 @@ STRATEGIES: dict[str, str] = {
         "- If unrealized PnL drops below -$200, seriously consider closing with topstepx_close().\n"
         "- Never let a loss grow beyond -$500. Close it immediately.\n"
         "- Hope is not a strategy. Cut the loser and find a better entry.\n\n"
+        "IMPORTANT — POSITIONS vs MARKET DATA:\n"
+        "- You receive price candle data for MULTIPLE symbols. This is market data for analysis only.\n"
+        "- Receiving candle data for a symbol does NOT mean you hold a position in it.\n"
+        "- ONLY topstepx_portfolio() tells you what positions you actually hold.\n"
+        "- NEVER assume you hold a position based on candle data. Always check portfolio first.\n"
+        "- NEVER call topstepx_close() on a contract unless portfolio shows you hold it.\n\n"
         "MANDATORY WORKFLOW (follow this exact sequence every invocation):\n"
         "1. Call topstepx_portfolio() to check current positions and PnL.\n"
-        "2. Analyze the multi-timeframe candle data provided. Decide on action.\n"
-        "3. If any position is losing > $200, CUT IT with topstepx_close().\n"
-        "4. If any position has unrealized profit of $300+, CLOSE IT with topstepx_close() to lock in the gain.\n"
-        "5. If a position is winning AND momentum confirms, consider scaling in (add 1 contract).\n"
-        "6. Only enter new positions when you see a clear trend/setup with defined risk.\n"
-        "7. If no clear opportunity, stay flat. Patience IS the edge.\n"
-        "8. ALWAYS end by calling report_sentiment() with your reasoning and market outlook.\n\n"
+        "2. READ the portfolio result carefully — it lists EXACTLY what you hold. Nothing more.\n"
+        "3. Analyze the multi-timeframe candle data provided. Decide on action.\n"
+        "4. If any position is losing > $200, CUT IT with topstepx_close().\n"
+        "5. If any position has unrealized profit of $300+, CLOSE IT with topstepx_close() to lock in the gain.\n"
+        "6. If a position is winning AND momentum confirms, consider scaling in (add 1 contract).\n"
+        "7. Only enter new positions when you see a clear trend/setup with defined risk.\n"
+        "8. If no clear opportunity, stay flat. Patience IS the edge.\n"
+        "9. ALWAYS end by calling report_sentiment() with your reasoning and market outlook.\n\n"
         "CRITICAL: You MUST call report_sentiment() as your FINAL tool call every single turn. "
-        "This is not optional. Example: report_sentiment(reasoning='Flat, no clear trend on MES 1hr/4hr candles', sentiment='neutral')"
+        "held_contracts, held_quantities, and total_pnl are VALIDATED against the real portfolio. "
+        "If you get them wrong, the call is REJECTED and you must retry with correct values. "
+        "Copy the contracts, quantities, and P&L EXACTLY from the topstepx_portfolio() result.\n"
+        "Example with position: report_sentiment(reasoning='Holding LONG 2x MES, P&L -$85. Waiting for breakout.', "
+        "sentiment='neutral', held_contracts='CON.F.US.MES.H26', held_quantities='2', total_pnl=-85.0)\n"
+        "Example flat: report_sentiment(reasoning='No positions. Waiting for setup.', "
+        "sentiment='neutral', held_contracts='none', held_quantities='0', total_pnl=0.0)"
     )
     + _REASONING_ADDENDUM,
 }
@@ -262,13 +287,11 @@ async def main() -> None:
             sys.exit(1)
         tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, report_sentiment, calculator]  # type: ignore
         print("  ✓ TopstepX tools enabled (futures mode)")
-        print("  ✓ allow_text_output=False enforced (monkey-patched)")
-        # Standard router - monkey-patch forces allow_text_output=False
         router = AgentRouterNode(
             chat_node=chat_node,
             tool_nodes=tools,
             name=args.name,
-            message_history_store=InMemoryMessageHistoryStore(),
+            message_history_store=StatelessHistoryStore(),
             system_prompt=system_prompt,
         )
     else:
@@ -279,7 +302,7 @@ async def main() -> None:
             chat_node=chat_node,
             tool_nodes=tools,
             name=args.name,
-            message_history_store=InMemoryMessageHistoryStore(),
+            message_history_store=StatelessHistoryStore(),
             system_prompt=system_prompt,
         )
     service.register_node(router, group_id=args.name)
