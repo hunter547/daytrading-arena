@@ -9,8 +9,10 @@ Fetches real account data from TopstepX API including:
 """
 
 import asyncio
+import json
 import logging
 import os
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -43,6 +45,7 @@ class TopstepXAccount:
     daily_pnl: float = 0.0
     total_pnl: float = 0.0
     trade_count: int = 0
+    can_trade: bool = True
     last_updated: Optional[datetime] = None
 
 
@@ -123,12 +126,10 @@ class TopstepXAccountClient:
             timeout=timeout,
             headers={"Authorization": f"Bearer {jwt_token}"}
         )
-        # Parse allowed account IDs from env var at init time
-        allowed_ids_str = os.getenv("TOPSTEPX_ACCOUNT_IDS", "").strip()
-        self._allowed_account_ids: set[str] | None = (
-            {aid.strip() for aid in allowed_ids_str.split(",") if aid.strip()}
-            if allowed_ids_str else None
-        )
+        # Cache for get_accounts() to avoid hammering the API
+        self._accounts_cache: list[TopstepXAccount] | None = None
+        self._accounts_cache_ts: float = 0.0
+        self._accounts_cache_ttl: float = 10.0  # seconds
     
     async def get_accounts(
         self, 
@@ -148,6 +149,10 @@ class TopstepXAccountClient:
         Returns:
             List of TopstepX accounts that are eligible for trading
         """
+        now = _time.monotonic()
+        if self._accounts_cache is not None and (now - self._accounts_cache_ts) < self._accounts_cache_ttl:
+            return self._accounts_cache
+
         try:
             url = f"{self._api_base}/api/Account/search"
             payload = {"onlyActiveAccounts": only_active}
@@ -166,10 +171,11 @@ class TopstepXAccountClient:
             
             accounts_data = data.get("accounts", [])
 
-            # Filter by TOPSTEPX_ACCOUNT_IDS early to skip unnecessary work
-            if self._allowed_account_ids:
-                accounts_data = [a for a in accounts_data if str(a.get("id", "")) in self._allowed_account_ids]
-                logger.info(f"Filtered to allowed account IDs: {self._allowed_account_ids}")
+            # Auto-select practice account (PRAC-*) if one exists
+            practice_accounts = [a for a in accounts_data if "PRAC" in a.get("name", "")]
+            if practice_accounts:
+                accounts_data = practice_accounts
+                logger.info(f"Auto-selected practice account: {practice_accounts[0].get('name')} (ID: {practice_accounts[0].get('id')})")
 
             accounts = []
             for acc_data in accounts_data:
@@ -225,6 +231,8 @@ class TopstepXAccountClient:
                     accounts.append(account)
             
             logger.info(f"Fetched {len(accounts)} account(s)")
+            self._accounts_cache = accounts
+            self._accounts_cache_ts = _time.monotonic()
             return accounts
             
         except httpx.HTTPStatusError as e:
@@ -253,9 +261,11 @@ class TopstepXAccountClient:
             # Debug: Log account_basic to see what fields are available
             logger.info(f"🔍 Account {account_id} ({name}) basic info: canTrade={can_trade}, isVisible={is_visible}, startingDayBalance={account_basic.get('startingDayBalance', 'N/A')}")
             
-            # Filter out accounts that can't trade or aren't visible
-            if not account_id or not is_visible or not can_trade:
-                logger.info(f"⏭️ Skipping account {account_id} ({name}): canTrade={can_trade}, isVisible={is_visible}")
+            # Filter out accounts that aren't visible or have no ID
+            # Note: canTrade is False outside market hours, so we don't filter on it
+            # for practice accounts — we still want to show their balance/positions.
+            if not account_id or not is_visible:
+                logger.info(f"⏭️ Skipping account {account_id} ({name}): isVisible={is_visible}")
                 return None
             
             # Fetch positions for this account
@@ -294,6 +304,7 @@ class TopstepXAccountClient:
                 daily_pnl=0.0,  # Would need historical data
                 total_pnl=realized_pnl + unrealized_pnl,
                 trade_count=0,  # Would need to fetch from trade history
+                can_trade=can_trade,
                 last_updated=datetime.now(),
             )
             
@@ -526,79 +537,200 @@ class TopstepXAccountClient:
 
 
 class TopstepXPriceStreamer:
-    """Streams real-time prices from TopstepX SignalR gateway.
+    """Streams real-time market prices via SignalR Market Hub.
 
-    Connects to the market hub and subscribes to GatewayQuote events,
-    updating TopstepXAccountClient._current_prices on each tick.
+    Uses SubscribeContractTrades on the Market Hub to get live price ticks.
+    Also connects to User Hub for account/position/order notifications.
     """
 
-    def __init__(self, jwt_token: str, symbols: list[str], ws_base: str = "https://rtc.topstepx.com"):
+    RECORD_SEPARATOR = "\x1e"
+
+    def __init__(self, jwt_token: str, symbols: list[str], ws_base: str = "https://rtc.topstepx.com",
+                 account_client: Optional['TopstepXAccountClient'] = None,
+                 account_id: Optional[int] = None):
         self._jwt_token = jwt_token
-        self._symbols = symbols
-        self._hub_url = f"{ws_base}/hubs/market?access_token={jwt_token}"
-        self._connection = None
+        self._symbols = set(symbols)
+        self._ws_base = ws_base
+        self._account_client = account_client
+        self._account_id = account_id
+        self._market_task: Optional[asyncio.Task] = None
+        self._user_task: Optional[asyncio.Task] = None
+        self._stop_event = asyncio.Event()
 
-    def _handle_trade(self, args) -> None:
-        """Handle GatewayTrade callback from SignalR.
+    # ── Market Hub (live prices) ──────────────────────────────────
 
-        GatewayTrade payload (list of trades):
-        [{ symbolId, price, timestamp, type, volume }, ...]
-        The contract_id comes as the first SignalR argument.
-        """
-        try:
-            if isinstance(args, list) and len(args) >= 2:
-                contract_id, data = args[0], args[1]
-            else:
-                logger.debug(f"Unexpected trade args format: {args}")
+    async def _run_market_hub(self) -> None:
+        """Connect to Market Hub and stream GatewayTrade events."""
+        import websockets
+
+        url = f"wss://{self._ws_base.split('://')[-1]}/hubs/market?access_token={self._jwt_token}"
+
+        while not self._stop_event.is_set():
+            try:
+                async with websockets.connect(url) as ws:
+                    # Handshake
+                    await ws.send(json.dumps({"protocol": "json", "version": 1}) + self.RECORD_SEPARATOR)
+                    hs = await ws.recv()
+                    if "error" in hs:
+                        logger.error(f"Market Hub handshake error: {hs}")
+                        await asyncio.sleep(5)
+                        continue
+
+                    # Subscribe to each symbol
+                    for i, symbol in enumerate(self._symbols):
+                        msg = json.dumps({
+                            "type": 1,
+                            "target": "SubscribeContractTrades",
+                            "arguments": [symbol],
+                            "invocationId": str(i + 1),
+                        }) + self.RECORD_SEPARATOR
+                        await ws.send(msg)
+
+                    logger.info(f"Market Hub connected — streaming {self._symbols}")
+
+                    while not self._stop_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                        except asyncio.TimeoutError:
+                            continue
+
+                        for chunk in raw.strip(self.RECORD_SEPARATOR).split(self.RECORD_SEPARATOR):
+                            if not chunk:
+                                continue
+                            msg = json.loads(chunk)
+                            msg_type = msg.get("type")
+
+                            if msg_type == 1:  # Invocation — GatewayTrade
+                                self._handle_gateway_trade(msg.get("arguments", []))
+                            elif msg_type == 7:  # Close
+                                logger.warning("Market Hub server closed connection")
+                                raise ConnectionError("Server closed")
+                            # type 3 = completion, type 6 = ping — ignore
+
+            except asyncio.CancelledError:
                 return
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.warning(f"Market Hub disconnected: {e} — reconnecting in 2s")
+                    await asyncio.sleep(2)
 
-            trades = data if isinstance(data, list) else [data]
-            for trade in trades:
-                price = trade.get("price")
+    def _handle_gateway_trade(self, args: list) -> None:
+        """Handle GatewayTrade event: [contractId, [trade, trade, ...]]"""
+        try:
+            if len(args) < 2:
+                return
+            contract_id = args[0]
+            trades = args[1]
+            if isinstance(trades, list) and trades:
+                latest = trades[-1]
+                price = latest.get("price")
                 if price is not None:
                     TopstepXAccountClient.update_market_price(contract_id, float(price))
         except Exception as e:
-            logger.error(f"Error handling price trade: {e}")
+            logger.error(f"Error handling GatewayTrade: {e}")
+
+    # ── User Hub (account/position/order events) ──────────────────
+
+    async def _run_user_hub(self) -> None:
+        """Connect to User Hub for account, position, order, and trade events."""
+        import websockets
+
+        if self._account_id is None:
+            logger.warning("No account ID — skipping User Hub")
+            return
+
+        url = f"wss://{self._ws_base.split('://')[-1]}/hubs/user?access_token={self._jwt_token}"
+
+        while not self._stop_event.is_set():
+            try:
+                async with websockets.connect(url) as ws:
+                    await ws.send(json.dumps({"protocol": "json", "version": 1}) + self.RECORD_SEPARATOR)
+                    hs = await ws.recv()
+                    if "error" in hs:
+                        logger.error(f"User Hub handshake error: {hs}")
+                        await asyncio.sleep(5)
+                        continue
+
+                    # Subscribe to all user streams
+                    for method, args in [
+                        ("SubscribeAccounts", []),
+                        ("SubscribeOrders", [self._account_id]),
+                        ("SubscribePositions", [self._account_id]),
+                        ("SubscribeTrades", [self._account_id]),
+                    ]:
+                        await ws.send(json.dumps({
+                            "type": 1, "target": method,
+                            "arguments": args, "invocationId": method,
+                        }) + self.RECORD_SEPARATOR)
+
+                    logger.info(f"User Hub connected — account {self._account_id}")
+
+                    while not self._stop_event.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                        except asyncio.TimeoutError:
+                            continue
+
+                        for chunk in raw.strip(self.RECORD_SEPARATOR).split(self.RECORD_SEPARATOR):
+                            if not chunk:
+                                continue
+                            msg = json.loads(chunk)
+                            msg_type = msg.get("type")
+
+                            if msg_type == 1:
+                                target = msg.get("target", "")
+                                event_args = msg.get("arguments", [])
+                                self._handle_user_event(target, event_args)
+                            elif msg_type == 7:
+                                logger.warning("User Hub server closed connection")
+                                raise ConnectionError("Server closed")
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.warning(f"User Hub disconnected: {e} — reconnecting in 2s")
+                    await asyncio.sleep(2)
+
+    def _handle_user_event(self, target: str, args: list) -> None:
+        """Dispatch User Hub events."""
+        try:
+            data = args[0] if args else {}
+            if target == "GatewayUserAccount":
+                if self._account_client:
+                    self._account_client._accounts_cache = None
+                logger.info(f"Account update: balance=${data.get('balance', 0):,.2f} canTrade={data.get('canTrade')}")
+            elif target == "GatewayUserPosition":
+                if self._account_client:
+                    self._account_client._accounts_cache = None
+                logger.info(f"Position update: {data.get('contractId')} size={data.get('size')} avg={data.get('averagePrice')}")
+            elif target == "GatewayUserTrade":
+                if self._account_client:
+                    self._account_client._accounts_cache = None
+                logger.info(f"User trade: {data.get('contractId')} @ ${data.get('price', 0):,.2f} pnl=${data.get('profitAndLoss', 0):,.2f}")
+            elif target == "GatewayUserOrder":
+                logger.info(f"Order update: {data.get('contractId')} status={data.get('status')}")
+        except Exception as e:
+            logger.error(f"Error handling {target}: {e}")
+
+    # ── Public API ────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start the SignalR connection and subscribe to trades."""
-        from signalrcore.hub_connection_builder import HubConnectionBuilder
-
+        """Start both Market Hub (prices) and User Hub (account events)."""
         logger.info(f"Starting price streamer for {self._symbols}")
-
-        self._connection = (
-            HubConnectionBuilder()
-            .with_url(
-                self._hub_url,
-                options={
-                    "skip_negotiation": True,
-                    "access_token_factory": lambda: self._jwt_token,
-                    "headers": {"Authorization": f"Bearer {self._jwt_token}"},
-                },
-            )
-            .build()
-        )
-
-        def _on_open():
-            logger.info("Price streamer SignalR connected")
-            for symbol in self._symbols:
-                self._connection.invoke("SubscribeContractTrades", [symbol])
-                logger.info(f"Price streamer subscribed to trades: {symbol}")
-
-        self._connection.on("GatewayTrade", self._handle_trade)
-        self._connection.on_open(_on_open)
-        self._connection.on_close(lambda: logger.warning("Price streamer SignalR disconnected, falling back to History API"))
-        self._connection.on_error(lambda data: logger.error(f"Price streamer SignalR error: {data}"))
-
-        self._connection.start()
+        self._market_task = asyncio.create_task(self._run_market_hub())
+        self._user_task = asyncio.create_task(self._run_user_hub())
 
     async def stop(self) -> None:
-        """Stop the SignalR connection."""
-        if self._connection:
-            try:
-                self._connection.stop()
-            except Exception as e:
-                logger.debug(f"Error stopping price streamer: {e}")
+        """Stop all streaming."""
+        self._stop_event.set()
+        for task in (self._market_task, self._user_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 async def main():

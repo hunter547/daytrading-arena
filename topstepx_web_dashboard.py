@@ -31,6 +31,7 @@ def create_app(
     trading_client,
     get_account_id: Callable[[], Optional[int]],
     get_agent_state: Optional[Callable[[], dict]] = None,
+    set_account_id: Optional[Callable[[int], None]] = None,
 ) -> FastAPI:
     """Create FastAPI app with shared trading state.
 
@@ -43,26 +44,58 @@ def create_app(
 
     view_only = os.getenv("DASHBOARD_VIEW_ONLY", "").lower() in ("1", "true", "yes")
 
-    # Cache for WebSocket portfolio pushes (avoid hammering API)
-    _portfolio_cache: dict = {"data": None, "ts": 0.0}
-    CACHE_TTL = 2.0
+    # Cached account summary, refreshed in background
+    _last_summary: dict = {"data": None}
 
-    async def _get_portfolio() -> dict:
-        """Get portfolio data, using cache if fresh."""
-        now = time.monotonic()
-        if _portfolio_cache["data"] and (now - _portfolio_cache["ts"]) < CACHE_TTL:
-            return _portfolio_cache["data"]
+    async def _refresh_loop():
+        """Background task that refreshes account data every 10s."""
+        while True:
+            try:
+                account_id = get_account_id()
+                if account_id is not None:
+                    summary = await trading_client.get_account_summary(account_id)
+                    if "error" not in summary:
+                        _last_summary["data"] = summary
+                        # If the returned account differs from what we asked for,
+                        # the old account was reset — update the global ID.
+                        returned_id = summary.get("accountId")
+                        if returned_id and str(returned_id) != str(account_id) and set_account_id:
+                            set_account_id(int(returned_id))
+            except Exception as e:
+                logger.error(f"Background refresh error: {e}")
+            await asyncio.sleep(10)
 
-        account_id = get_account_id()
-        if account_id is None:
-            return {"error": "No practice account"}
+    @app.on_event("startup")
+    async def _start_refresh():
+        asyncio.create_task(_refresh_loop())
 
-        summary = await trading_client.get_account_summary(account_id)
+    def _build_snapshot() -> dict:
+        """Build portfolio snapshot from cached summary + live prices. Non-blocking."""
+        summary = _last_summary["data"]
+        if summary is None:
+            return {"error": "Loading account data..."}
+
         prices = dict(TopstepXAccountClient._current_prices)
-        result = {**summary, "prices": prices}
-        _portfolio_cache["data"] = result
-        _portfolio_cache["ts"] = now
-        return result
+        positions = [dict(p) for p in summary.get("positions", [])]
+
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            live_price = prices.get(symbol)
+            if live_price is not None and pos.get("avgPrice"):
+                avg = pos["avgPrice"]
+                qty = pos.get("quantity", 0)
+                specs = TopstepXAccountClient.get_contract_specs(symbol)
+                if specs:
+                    tick_size = specs["tickSize"]
+                    tick_value = specs["tickValue"]
+                    pos["unrealizedPnL"] = ((live_price - avg) / tick_size) * tick_value * qty
+                else:
+                    pos["unrealizedPnL"] = (live_price - avg) * qty
+
+        total_unrealized = sum(p.get("unrealizedPnL", 0) for p in positions)
+        balance = summary.get("balance", 0)
+
+        return {**summary, "equity": balance + total_unrealized, "positions": positions, "prices": prices}
 
     # ── Routes ────────────────────────────────────────────────────
 
@@ -76,7 +109,7 @@ def create_app(
 
     @app.get("/api/portfolio")
     async def api_portfolio():
-        return await _get_portfolio()
+        return _build_snapshot()
 
     @app.get("/api/prices")
     async def api_prices():
@@ -107,6 +140,7 @@ def create_app(
             side=OrderSide.BUY,
             size=quantity,
         )
+        trading_client._account_client._accounts_cache = None  # Invalidate cache after trade
         return result
 
     @app.post("/api/sell")
@@ -128,45 +162,20 @@ def create_app(
             side=OrderSide.SELL,
             size=quantity,
         )
+        trading_client._account_client._accounts_cache = None  # Invalidate cache after trade
         return result
 
     @app.post("/api/close")
     async def api_close(contract: str = Query(...)):
-        """Close/flatten a position by sending an opposite-side market order."""
+        """Close/flatten a position using the close API."""
         if view_only:
             return JSONResponse({"success": False, "error": "Dashboard is in view-only mode"}, 403)
         account_id = get_account_id()
         if account_id is None:
             return JSONResponse({"success": False, "error": "No practice account"}, 400)
 
-        # Look up the position to determine direction and size
-        summary = await trading_client.get_account_summary(account_id)
-        positions = summary.get("positions", [])
-        target = None
-        for pos in positions:
-            if pos["symbol"] == contract:
-                target = pos
-                break
-
-        if target is None:
-            return JSONResponse({"success": False, "error": f"No open position for {contract}"}, 400)
-
-        qty = target["quantity"]
-        if qty == 0:
-            return JSONResponse({"success": False, "error": "Position size is zero"}, 400)
-
-        from topstepx_trading_tools import OrderSide
-
-        # Opposite side to flatten
-        side = OrderSide.SELL if qty > 0 else OrderSide.BUY
-        size = abs(int(qty))
-
-        result = await trading_client.place_market_order(
-            account_id=account_id,
-            contract_id=contract,
-            side=side,
-            size=size,
-        )
+        result = await trading_client.close_position(account_id, contract)
+        trading_client._account_client._accounts_cache = None
         return result
 
     # ── WebSocket ─────────────────────────────────────────────────
@@ -177,14 +186,14 @@ def create_app(
         logger.info("WebSocket client connected")
         try:
             while True:
-                data = await _get_portfolio()
+                data = _build_snapshot()
                 if get_agent_state:
                     data["agent"] = get_agent_state()
                 await ws.send_json(data)
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
         except WebSocketDisconnect:
             logger.info("WebSocket client disconnected")
         except Exception as e:
-            logger.debug(f"WebSocket error: {e}")
+            logger.error(f"WebSocket error: {e}", exc_info=True)
 
     return app

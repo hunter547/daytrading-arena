@@ -52,7 +52,7 @@ ModelRequestParameters.__init__ = _patched_model_request_params_init
 
 # Import TopstepX tools if available
 try:
-    from topstepx_trading_tools import report_sentiment, topstepx_buy, topstepx_portfolio, topstepx_sell
+    from topstepx_trading_tools import report_sentiment, topstepx_buy, topstepx_close, topstepx_portfolio, topstepx_sell
 
     TOPSTEPX_AVAILABLE = True
 except ImportError:
@@ -161,20 +161,44 @@ STRATEGIES: dict[str, str] = {
         "- topstepx_portfolio(): REQUIRED on every invocation - check positions first\n"
         '- topstepx_buy(contract, quantity): Go LONG (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
         '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MNQ.H26", quantity=1)\n'
+        '- topstepx_close(contract, quantity): CLOSE a position. quantity=0 closes ALL contracts. '
+        'Use this to take profit or cut losses.\n'
         "- calculator(expression): Calculate P&L, position sizes, etc.\n"
         '- report_sentiment(reasoning, sentiment): REQUIRED on every invocation - report your '
         'analysis (reasoning="1-2 sentences", sentiment="bullish"|"bearish"|"neutral")\n\n'
         "CONTRACTS:\n"
         "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point, tickSize=0.25, tickValue=$1.25)\n"
         "- CON.F.US.MNQ.H26: Micro E-mini Nasdaq-100 ($2/point, tickSize=0.25, tickValue=$0.50)\n\n"
+        "NO HEDGING - THIS IS A STRICT TOPSTEP RULE:\n"
+        "- ALL open positions must be in the SAME direction. No mixing longs and shorts.\n"
+        "- If you are LONG MES, you CANNOT go SHORT MNQ (or any other contract). Everything must be long.\n"
+        "- If you are SHORT MNQ, you CANNOT go LONG MES (or any other contract). Everything must be short.\n"
+        "- To reverse direction: CLOSE ALL existing positions first with topstepx_close(), then enter in the new direction.\n"
+        "- Violating this rule will get the account flagged and potentially terminated.\n\n"
+        "CLOSING POSITIONS:\n"
+        "- ALWAYS use topstepx_close(contract) to close or reduce positions.\n"
+        "- topstepx_close(contract) with no quantity closes the ENTIRE position.\n"
+        "- topstepx_close(contract, quantity=5) closes 5 contracts (partial close).\n"
+        "- Do NOT use topstepx_sell to close longs or topstepx_buy to close shorts. Use topstepx_close.\n\n"
+        "TAKE PROFIT - LOCK IN GAINS:\n"
+        "- When your unrealized PnL is between $300-$2,000, TAKE PROFIT. Call topstepx_close().\n"
+        "- Do NOT let winners turn into losers. Green on screen means close the trade.\n"
+        "- It is far better to take a $500 profit than to watch it evaporate hoping for more.\n"
+        "- After taking profit, you can always re-enter if the setup is still valid.\n"
+        "- Greed kills accounts. A series of small wins compounds into a great day.\n\n"
+        "CUT LOSERS:\n"
+        "- If unrealized PnL drops below -$200, seriously consider closing with topstepx_close().\n"
+        "- Never let a loss grow beyond -$500. Close it immediately.\n"
+        "- Hope is not a strategy. Cut the loser and find a better entry.\n\n"
         "MANDATORY WORKFLOW (follow this exact sequence every invocation):\n"
         "1. Call topstepx_portfolio() to check current positions and PnL.\n"
         "2. Analyze the multi-timeframe candle data provided. Decide on action.\n"
-        "3. If any position is losing, strongly consider cutting it.\n"
-        "4. If a position is winning AND momentum confirms, consider scaling in (add 1 contract).\n"
-        "5. Only enter new positions when you see a clear trend/setup with defined risk.\n"
-        "6. If no clear opportunity, stay flat. Patience IS the edge.\n"
-        "7. ALWAYS end by calling report_sentiment() with your reasoning and market outlook.\n\n"
+        "3. If any position is losing > $200, CUT IT with topstepx_close().\n"
+        "4. If any position has unrealized profit of $300+, CLOSE IT with topstepx_close() to lock in the gain.\n"
+        "5. If a position is winning AND momentum confirms, consider scaling in (add 1 contract).\n"
+        "6. Only enter new positions when you see a clear trend/setup with defined risk.\n"
+        "7. If no clear opportunity, stay flat. Patience IS the edge.\n"
+        "8. ALWAYS end by calling report_sentiment() with your reasoning and market outlook.\n\n"
         "CRITICAL: You MUST call report_sentiment() as your FINAL tool call every single turn. "
         "This is not optional. Example: report_sentiment(reasoning='Flat, no clear trend on MES 1hr/4hr candles', sentiment='neutral')"
     )
@@ -236,7 +260,7 @@ async def main() -> None:
         if not TOPSTEPX_AVAILABLE:
             print("ERROR: TopstepX tools not available for futures strategy")
             sys.exit(1)
-        tools = [topstepx_buy, topstepx_sell, topstepx_portfolio, report_sentiment, calculator]  # type: ignore
+        tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, report_sentiment, calculator]  # type: ignore
         print("  ✓ TopstepX tools enabled (futures mode)")
         print("  ✓ allow_text_output=False enforced (monkey-patched)")
         # Standard router - monkey-patch forces allow_text_output=False
