@@ -339,6 +339,23 @@ def _truncate(s: str, max_len: int) -> str:
     return s[: max_len - 1] + "\u2026"
 
 
+_POSITION_WORDS = re.compile(
+    r'\b(long|short|flat|holding|hold|held|positions?|contracts?|MES|MNQ|unrealized|P&L|pnl|no open|no entries)\b',
+    re.IGNORECASE,
+)
+
+
+def _filter_position_hallucinations(text: str) -> str:
+    """Strip sentences that mention positions/contracts from LLM text.
+
+    The ground-truth prefix has accurate position data; we only keep
+    the strategy/analysis portion of the reasoning.
+    """
+    sentences = re.split(r'(?<=[.!;])\s+', text)
+    cleaned = [s for s in sentences if not _POSITION_WORDS.search(s)]
+    return " ".join(cleaned).strip() if cleaned else "Monitoring market conditions."
+
+
 def _format_tool_call(part: ToolCallPart) -> str:
     try:
         args = part.args_as_dict()
@@ -388,7 +405,7 @@ def _process_agent_envelope(envelope: EventEnvelope) -> None:
                 _agent_activity.append({"time": now, "kind": "TOOL CALL", "details": "\n".join(lines)})
             if text_parts:
                 text = " ".join(text_parts)
-                _agent_state["latest_reasoning"] = text
+                _agent_state["latest_reasoning"] = _filter_position_hallucinations(text)
                 sentiment = _extract_sentiment(text)
                 _agent_state["sentiment"] = sentiment
                 logger.info(f"Sentiment extracted from text: {sentiment} | Reasoning: {_truncate(text, 150)}")
@@ -409,6 +426,20 @@ def _process_agent_envelope(envelope: EventEnvelope) -> None:
                     for tr in tool_returns
                 ]
                 _agent_activity.append({"time": now, "kind": "TOOL RESULT", "details": "\n".join(lines)})
+                # Use portfolio tool results to keep dashboard positions accurate
+                for tr in tool_returns:
+                    if tr.tool_name == "topstepx_portfolio":
+                        result = tr.model_response_str()
+                        # Extract the "YOU HOLD: ..." line as ground-truth
+                        for line in result.split("\n"):
+                            if line.startswith("YOU HOLD:"):
+                                portfolio_info = line.strip()
+                                existing = _agent_state.get("latest_reasoning") or ""
+                                # Replace any old [LONG/SHORT/Flat] prefix
+                                existing = re.sub(r"^\[.*?\]\s*", "", existing)
+                                existing = _filter_position_hallucinations(existing)
+                                _agent_state["latest_reasoning"] = f"[{portfolio_info}] {existing}"
+                                break
 
     _agent_state["activity"] = list(_agent_activity)
 
@@ -456,6 +487,15 @@ async def topstepx_buy(
                 f"❌ BLOCKED: You have a SHORT position ({abs(int(pos.quantity))}x {pos.symbol}). "
                 f"Cannot place a BUY order while short. Use topstepx_close() to close "
                 f"your short position first, then enter a new long."
+            )
+
+    # Never add to a losing long position
+    for pos in positions:
+        if pos.quantity > 0 and pos.unrealized_pnl < 0:
+            return (
+                f"❌ BLOCKED: Your LONG {abs(int(pos.quantity))}x {pos.symbol} is losing "
+                f"(P&L: ${pos.unrealized_pnl:+,.2f}). Never add to a loser. "
+                f"Cut the loss with topstepx_close() or wait for it to turn green."
             )
 
     # Place market buy order
@@ -520,6 +560,15 @@ async def topstepx_sell(
                 f"your long position first, then enter a new short."
             )
 
+    # Never add to a losing short position
+    for pos in positions:
+        if pos.quantity < 0 and pos.unrealized_pnl < 0:
+            return (
+                f"❌ BLOCKED: Your SHORT {abs(int(pos.quantity))}x {pos.symbol} is losing "
+                f"(P&L: ${pos.unrealized_pnl:+,.2f}). Never add to a loser. "
+                f"Cut the loss with topstepx_close() or wait for it to turn green."
+            )
+
     # Place market sell order
     logger.info(f"🔴 EXECUTING SELL ORDER: {quantity}x {contract}")
     result = await _trading_client.place_market_order(
@@ -574,6 +623,11 @@ async def topstepx_close(
 
     # Look up the current position
     positions = await _trading_client._account_client.get_positions(account_id)
+
+    if not positions:
+        logger.warning(f"⛔ CLOSE BLOCKED: No positions at all, but LLM tried to close {contract}")
+        return "STOP: You have ZERO open positions. There is nothing to close. Do NOT call topstepx_close."
+
     target = None
     for pos in positions:
         if pos.symbol == contract:
@@ -581,7 +635,9 @@ async def topstepx_close(
             break
 
     if target is None:
-        return f"❌ No open position for {contract}"
+        held = ", ".join(f"{pos.symbol} qty={int(pos.quantity)}" for pos in positions)
+        logger.warning(f"⛔ CLOSE BLOCKED: LLM tried to close {contract} but only holding [{held}]")
+        return f"STOP: You do NOT hold {contract}. You only hold: {held}. Do NOT close what you don't have."
 
     pos_size = abs(int(target.quantity))
     if pos_size == 0:
@@ -624,15 +680,17 @@ async def topstepx_close(
             return f"❌ Partial close failed: {error}"
 
 
+_sentiment_cache: dict = {"time": 0.0}
+
+
 @agent_tool
 async def report_sentiment(
     ctx: ToolContext,
-    reasoning: str,
-    sentiment: str,
+    reasoning: str = "",
+    sentiment: str = "neutral",
+    **kwargs,
 ) -> str:
     """Report your current market reasoning and sentiment assessment.
-
-    Call this EVERY response to share your analysis.
 
     Args:
         reasoning: 1-2 sentences explaining what you did (or chose not to do) and why.
@@ -641,70 +699,165 @@ async def report_sentiment(
     Returns:
         Confirmation message
     """
+    import time as _time
+
+    # ── Rescue values from wrong arg names the LLM may use ──
+    if not reasoning and kwargs:
+        reasoning = str(next(iter(kwargs.values()), ""))
+    if sentiment == "neutral" and kwargs:
+        for v in kwargs.values():
+            if isinstance(v, str) and v.strip().lower() in ("bullish", "bearish"):
+                sentiment = v.strip().lower()
+                break
+
+    # ── Throttle when flat: only update once per candle cycle (60s) ──
+    now = _time.time()
+    cache = _portfolio_cache
+    if not cache.get("has_positions") and (now - _sentiment_cache["time"]) < 55.0:
+        return "Recorded. STOP — do not call any more tools this turn."
+    _sentiment_cache["time"] = now
+
+    # ── Use cached portfolio state (already fetched by topstepx_portfolio or market connector)
+    if cache.get("has_positions"):
+        portfolio_prefix = cache.get("prefix", "[Unknown] ")
+    else:
+        portfolio_prefix = "[Flat] "
+
+    # Fetch fresh positions only when we have positions (for accurate PnL prefix)
+    if cache.get("has_positions"):
+        actual_pnl_by_contract: dict[str, float] = {}
+        actual_positions: dict[str, int] = {}
+        try:
+            account_id = await _ensure_practice_account()
+            if account_id and _trading_client:
+                _trading_client._account_client._accounts_cache = None
+                summary = await _trading_client.get_account_summary(account_id)
+                if "error" not in summary:
+                    for pos in summary.get("positions", []):
+                        actual_positions[pos["symbol"]] = int(pos["quantity"])
+                        pnl = pos.get("unrealizedPnL", 0.0)
+                        actual_pnl_by_contract[pos["symbol"]] = pnl
+            if actual_positions:
+                parts = []
+                for contract, qty in actual_positions.items():
+                    direction = "LONG" if qty > 0 else "SHORT"
+                    pnl = actual_pnl_by_contract.get(contract, 0.0)
+                    parts.append(f"{direction} {abs(qty)}x {contract} P&L: ${pnl:+,.2f}")
+                portfolio_prefix = f"[{', '.join(parts)}] "
+            else:
+                portfolio_prefix = "[Flat] "
+                _portfolio_cache["has_positions"] = False
+        except Exception:
+            pass
+
     sentiment_lower = sentiment.strip().lower()
     if sentiment_lower not in ("bullish", "bearish", "neutral"):
         sentiment_lower = "neutral"
 
-    _agent_state["latest_reasoning"] = reasoning
+    # ── Update dashboard with ground-truth + filtered reasoning ──
+    display_reasoning = _filter_position_hallucinations(reasoning)
+    _agent_state["latest_reasoning"] = portfolio_prefix + display_reasoning
     _agent_state["sentiment"] = sentiment_lower
     _agent_state["last_active"] = datetime.now().isoformat()
-    logger.info(f"Sentiment reported via tool: {sentiment_lower} | Reasoning: {_truncate(reasoning, 150)}")
 
+    logger.info(f"Sentiment ACCEPTED: {sentiment_lower} | {portfolio_prefix}| Display: {_truncate(display_reasoning, 150)}")
     return f"Recorded sentiment: {sentiment_lower}"
+
+
+_portfolio_cache: dict = {"result": None, "time": 0.0, "has_positions": False}
 
 
 @agent_tool
 async def topstepx_portfolio(ctx: ToolContext) -> str:
-    """Get portfolio status.
-    
+    """Get portfolio status with real-time P&L.
+
     Returns:
-        Portfolio summary
+        Portfolio summary with live position data
     """
     _init_client()
-    
+
     if _trading_client is None:
         return "❌ TopstepX trading not available. Set TOPSTEPX_JWT_TOKEN in .env"
-    
+
     account_id = await _ensure_practice_account()
     if account_id is None:
         return "❌ No practice account found"
-    
+
+    # When flat, return cached result for 30s to avoid spamming API
+    import time as _time
+    now = _time.time()
+    cache = _portfolio_cache
+    if (
+        cache["result"] is not None
+        and not cache["has_positions"]
+        and (now - cache["time"]) < 30.0
+    ):
+        logger.debug(f"📊 PORTFOLIO (cached flat): returning cached result")
+        return cache["result"]
+
     logger.info(f"📊 CHECKING PORTFOLIO STATUS for account {account_id}")
+
+    # Invalidate cache so we always get fresh positions with live prices
+    _trading_client._account_client._accounts_cache = None
     summary = await _trading_client.get_account_summary(account_id)
-    
+
     if "error" in summary:
         return f"❌ {summary['error']}"
-    
+
     positions = summary.get("positions", [])
-    
+    balance = summary["balance"]
+
     if not positions:
-        logger.info(f"💼 PORTFOLIO: No open positions | Equity: ${summary['equity']:,.2f}")
-        return (
-            f"📊 TopstepX Portfolio (Account: {summary['name']})\n"
-            f"  Equity: ${summary['equity']:,.2f}\n"
-            f"  Balance: ${summary['balance']:,.2f}\n"
-            f"  Positions: None"
+        logger.info(f"💼 PORTFOLIO: No open positions | Balance: ${balance:,.2f}")
+        _agent_state["last_active"] = datetime.now().isoformat()
+        result = (
+            f"YOU HOLD: nothing — 0 open positions.\n"
+            f"Balance: ${balance:,.2f} | Equity: ${balance:,.2f}\n"
+            f"---\nNOW call report_sentiment(reasoning=<your analysis>, sentiment=<bullish|bearish|neutral>)"
         )
-    
-    lines = [
-        f"📊 TopstepX Portfolio (Account: {summary['name']})",
-        f"  Equity: ${summary['equity']:,.2f}",
-        f"  Balance: ${summary['balance']:,.2f}",
-        f"  Positions:",
-    ]
-    
+        _portfolio_cache.update(result=result, time=now, has_positions=False)
+        return result
+
+    # Build a blunt one-line summary the model can't miss
+    total_pnl = 0.0
+    hold_parts = []
+    pos_lines = []
+
     for pos in positions:
-        qty = pos['quantity']
+        qty = pos["quantity"]
         direction = "LONG" if qty > 0 else "SHORT"
-        pnl = pos['unrealizedPnL']
-        pnl_sign = "+" if pnl >= 0 else ""
-        
-        position_str = f"{pos['symbol']}: {direction} {abs(qty)} @ ${pos['avgPrice']:,.2f} (P&L: {pnl_sign}${pnl:,.2f})"
-        logger.info(f"💼 DISPLAYING: {position_str} (qty={qty})")
-        
-        lines.append(f"    {position_str}")
-    
-    return "\n".join(lines)
+        abs_qty = abs(int(qty))
+        avg = pos["avgPrice"]
+        pnl = pos["unrealizedPnL"]
+        total_pnl += pnl
+
+        hold_parts.append(f"{direction} {abs_qty}x {pos['symbol']} (P&L: ${pnl:+,.2f})")
+        pos_lines.append(
+            f"  {pos['symbol']}: {direction} {abs_qty} @ ${avg:,.2f} | P&L: ${pnl:+,.2f}"
+        )
+        logger.info(f"💼 POSITION: {pos['symbol']} {direction} {abs_qty} @ ${avg:,.2f} | P&L: ${pnl:+,.2f}")
+
+    equity = balance + total_pnl
+
+    lines = [
+        f"YOU HOLD: {', '.join(hold_parts)}",
+        f"Total unrealized P&L: ${total_pnl:+,.2f}",
+        f"Balance: ${balance:,.2f} | Equity: ${equity:,.2f}",
+    ]
+
+    if total_pnl <= -200:
+        lines.append(f"WARNING: You are losing ${total_pnl:,.2f} — close losing positions NOW.")
+    elif total_pnl >= 300:
+        lines.append(f"You have ${total_pnl:+,.2f} profit — take profit NOW with topstepx_close().")
+
+    lines.append(
+        f"---\nNOW call report_sentiment(reasoning=<your analysis>, sentiment=<bullish|bearish|neutral>)"
+    )
+
+    _agent_state["last_active"] = datetime.now().isoformat()
+    result = "\n".join(lines)
+    _portfolio_cache.update(result=result, time=now, has_positions=True)
+    return result
 
 
 # ── Main service ─────────────────────────────────────────────────

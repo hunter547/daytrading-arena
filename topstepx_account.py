@@ -419,12 +419,17 @@ class TopstepXAccountClient:
             # DEBUG: Log raw API data to verify type mapping
             logger.info(f"🔍 API POSITION: contract={contract_id}, type={position_type}, size={size}, avgPrice={avg_price}")
             
+            # Adjust size for short positions (make negative) BEFORE PnL calc
+            if position_type == 2:  # Short
+                size = -abs(size)
+
             # Get current market price for PnL calculation
             current_price = self.get_market_price(contract_id)
-            
+
             if current_price:
                 # Calculate unrealized PnL using tick-based futures formula:
-                # PnL = (price_diff / tickSize) * tickValue * size
+                # PnL = (price_diff / tickSize) * tickValue * signed_size
+                # For longs: price up = positive PnL. For shorts: price up = negative PnL.
                 price_diff = current_price - avg_price
                 specs = self.get_contract_specs(contract_id)
                 if specs:
@@ -433,21 +438,15 @@ class TopstepXAccountClient:
                     unrealized_pnl = (price_diff / tick_size) * tick_value * size
                     logger.info(f"   💰 PnL CALC: current=${current_price:,.2f}, avg=${avg_price:,.2f}, diff={price_diff:,.2f}, tickSize={tick_size}, tickValue={tick_value}, size={size}, PnL=${unrealized_pnl:,.2f}")
                 else:
-                    # Fallback if contract specs not available
                     unrealized_pnl = price_diff * size
                     logger.warning(f"   ⚠️  No contract specs for {contract_id}, using simple PnL: ${unrealized_pnl:,.2f}")
-                market_value = current_price * size
+                market_value = current_price * abs(size)
             else:
-                # No current price available - use avg_price as fallback
-                market_value = size * avg_price
+                market_value = abs(size) * avg_price
                 unrealized_pnl = 0.0
                 logger.warning(f"   ⚠️  No current price for {contract_id}, PnL = $0.00")
-            
+
             realized_pnl = 0.0
-            
-            # Adjust size for short positions (make negative)
-            if position_type == 2:  # Short
-                size = -abs(size)
             
             return TopstepXPosition(
                 symbol=contract_id,

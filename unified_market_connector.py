@@ -62,6 +62,7 @@ class UnifiedMarketConnector:
         enable_candles: bool = True,
         candle_interval_seconds: int = 60,
         candles_only: bool = False,
+        account_client=None,
     ):
         """Initialize unified connector.
 
@@ -73,6 +74,7 @@ class UnifiedMarketConnector:
             enable_candles: Whether to fetch and publish historical candles
             candle_interval_seconds: How often to refresh candles (default: 60s)
             candles_only: If True, disable WebSocket streaming and only fetch candles via REST
+            account_client: Optional TopstepXAccountClient for portfolio injection
         """
         self._broker = broker
         self._router_node = router_node
@@ -82,16 +84,60 @@ class UnifiedMarketConnector:
         self._enable_candles = enable_candles
         self._candle_interval = candle_interval_seconds
         self._candles_only = candles_only
+        self._account_client = account_client
 
         self._running = False
         self._last_publish_time: dict[str, float] = {}
         self._latest_quotes: dict[str, Quote] = {}
+        self._cached_portfolio_line: str = "CURRENT POSITIONS: NONE — you are completely flat."
+        self._portfolio_cache_time: float = 0.0
 
         # Set adapter callbacks
         adapter._on_quote = self._on_quote
         adapter._on_trade = self._on_trade
         adapter._on_candle = self._on_candle
         adapter._on_depth = self._on_depth
+
+    async def _get_portfolio_line(self) -> str:
+        """Fetch current portfolio and return a one-line summary.
+
+        Caches for 5 seconds to avoid excessive API calls.
+        """
+        now = time.time()
+        if now - self._portfolio_cache_time < 5.0:
+            return self._cached_portfolio_line
+
+        if not self._account_client:
+            return self._cached_portfolio_line
+
+        try:
+            accounts = await self._account_client.get_accounts()
+            account_id = None
+            for acct in accounts:
+                if "PRAC" in acct.name:
+                    account_id = int(acct.account_id)
+                    break
+            if not account_id:
+                return self._cached_portfolio_line
+
+            positions = await self._account_client.get_positions(account_id)
+            if not positions:
+                line = "CURRENT POSITIONS: NONE — you are completely flat. Do NOT call topstepx_close."
+            else:
+                parts = []
+                for pos in positions:
+                    direction = "LONG" if pos.quantity > 0 else "SHORT"
+                    parts.append(
+                        f"{direction} {abs(int(pos.quantity))}x {pos.symbol} "
+                        f"@ ${pos.avg_price:,.2f} P&L: ${pos.unrealized_pnl:+,.2f}"
+                    )
+                line = f"CURRENT POSITIONS: {', '.join(parts)}"
+            self._cached_portfolio_line = line
+            self._portfolio_cache_time = now
+        except Exception as e:
+            logger.warning(f"Portfolio fetch error: {e}")
+
+        return self._cached_portfolio_line
 
     async def _publish_to_agent(
         self, user_prompt: str, deps: dict | None = None
@@ -319,7 +365,16 @@ class UnifiedMarketConnector:
                 (60, 20, 0, "1-min candles (last 20 minutes)"),
             ]
 
-            prompt_parts = [f"\nHistorical Candles for {symbol}:"]
+            # Map contract IDs to friendly names so LLM doesn't confuse
+            # market data symbols with positions it holds
+            _FRIENDLY = {
+                "CON.F.US.MES.H26": "E-mini S&P 500 Micro",
+                "CON.F.US.MNQ.H26": "E-mini Nasdaq-100 Micro",
+            }
+            friendly = _FRIENDLY.get(symbol, symbol)
+            prompt_parts = [
+                f"\n[CHART DATA for {friendly} — this is NOT a position, just price history for analysis]"
+            ]
 
             for granularity, lookback_mins, offset_mins, description in timeframes:
                 start_time = now - timedelta(minutes=lookback_mins)
@@ -365,6 +420,11 @@ class UnifiedMarketConnector:
                     f"(Bid: ${quote.best_bid:,.2f}, Ask: ${quote.best_ask:,.2f})",
                 )
 
+            # Inject current portfolio state as the first line
+            portfolio_line = await self._get_portfolio_line()
+            prompt_parts.insert(0, portfolio_line)
+            logger.info(f"📋 Portfolio injected: {portfolio_line[:80]}")
+
             # Publish enriched data with allow_text_output=False
             await self._publish_to_agent(
                 user_prompt="\n".join(prompt_parts),
@@ -374,7 +434,7 @@ class UnifiedMarketConnector:
             logger.debug(f"Published candles for {symbol}")
 
         except Exception as e:
-            logger.error(f"Error fetching/publishing candles for {symbol}: {e}")
+            logger.error(f"Error fetching/publishing candles for {symbol}: {e}", exc_info=True)
 
 
 async def main():
@@ -494,6 +554,13 @@ async def main():
         )
         logger.info(f"Using TopstepX adapter ({environment}) for: {args.symbols}")
 
+    # Create account client for portfolio injection (futures only)
+    account_client = None
+    if args.provider == "topstepx":
+        from topstepx_account import TopstepXAccountClient
+        account_client = TopstepXAccountClient(jwt_token=jwt_token)
+        logger.info("✓ Account client initialized for portfolio injection")
+
     # Create unified connector
     connector = UnifiedMarketConnector(
         broker=broker,
@@ -502,6 +569,7 @@ async def main():
         min_publish_interval=args.interval,
         candle_interval_seconds=args.candle_interval,
         candles_only=args.candles_only,
+        account_client=account_client,
     )
 
     # Handle shutdown
