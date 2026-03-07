@@ -103,6 +103,7 @@ services:
       - AGENT_MODEL=gpt-5-nano
       - AGENT_STRATEGY=futures
       - TOPSTEPX_STREAM_SYMBOLS=CON.F.US.MES.H26
+      - TOPSTEP_REFRESH_TOKEN=${TOPSTEP_REFRESH_TOKEN:-}
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers localhost:9092

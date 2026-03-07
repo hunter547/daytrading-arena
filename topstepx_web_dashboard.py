@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from topstepx_account import TopstepXAccountClient
+from topstepx_web_client import TopstepDashboardClient, TopstepXWebClient, WebTradingAccount
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ def create_app(
     get_account_id: Callable[[], Optional[int]],
     get_agent_state: Optional[Callable[[], dict]] = None,
     set_account_id: Optional[Callable[[int], None]] = None,
+    web_client: Optional[TopstepXWebClient] = None,
+    dashboard_client: Optional[TopstepDashboardClient] = None,
 ) -> FastAPI:
     """Create FastAPI app with shared trading state.
 
@@ -39,6 +42,8 @@ def create_app(
         trading_client: TopstepXTradingClient instance (shared with Kafka workers)
         get_account_id: Callable returning the current practice account ID
         get_agent_state: Optional callable returning current agent activity state
+        web_client: Optional TopstepXWebClient for richer account data
+        dashboard_client: Optional TopstepDashboardClient for balance history
     """
     app = FastAPI(title="TopstepX Dashboard", docs_url=None, redoc_url=None)
 
@@ -46,6 +51,10 @@ def create_app(
 
     # Cached account summary, refreshed in background
     _last_summary: dict = {"data": None}
+    # Cached web account data (richer stats), refreshed alongside summary
+    _last_web_account: dict = {"data": None}
+    # Cached dashboard account ID (mapped from TopstepX account ID)
+    _dash_account_id: dict = {"value": None}
 
     async def _refresh_loop():
         """Background task that refreshes account data every 10s."""
@@ -61,6 +70,15 @@ def create_app(
                         returned_id = summary.get("accountId")
                         if returned_id and str(returned_id) != str(account_id) and set_account_id:
                             set_account_id(int(returned_id))
+
+                    # Fetch richer stats from the web client
+                    if web_client:
+                        try:
+                            acct = await web_client.get_active_practice_account()
+                            if acct:
+                                _last_web_account["data"] = acct
+                        except Exception as e:
+                            logger.debug(f"Web client refresh error: {e}")
             except Exception as e:
                 logger.error(f"Background refresh error: {e}")
             await asyncio.sleep(10)
@@ -95,13 +113,47 @@ def create_app(
         total_unrealized = sum(p.get("unrealizedPnL", 0) for p in positions)
         balance = summary.get("balance", 0)
 
-        return {**summary, "equity": balance + total_unrealized, "positions": positions, "prices": prices}
+        from unified_market_connector import UnifiedMarketConnector
+        market_open = UnifiedMarketConnector._is_market_open()
+
+        snapshot = {**summary, "equity": balance + total_unrealized, "positions": positions, "prices": prices, "market_open": market_open}
+
+        # Merge richer web-account stats when available
+        wa: Optional[WebTradingAccount] = _last_web_account["data"]
+        if wa:
+            snapshot["webAccount"] = {
+                "winRate": wa.win_rate,
+                "totalTrades": wa.total_trades,
+                "totalProfit": wa.total_profit,
+                "totalLoss": wa.total_loss,
+                "maximumLoss": wa.maximum_loss,
+                "highestBalance": wa.highest_balance,
+                "startOfDayBalance": wa.start_of_day_balance,
+                "realizedDayPnl": wa.realized_day_pnl,
+                "dailyLoss": wa.daily_loss,
+                "profitAndLoss": wa.profit_and_loss,
+                "startingBalance": wa.starting_balance,
+            }
+
+        return snapshot
 
     # ── Routes ────────────────────────────────────────────────────
 
     @app.get("/")
     async def serve_dashboard():
-        return FileResponse(STATIC_DIR / "index.html")
+        from starlette.responses import HTMLResponse
+
+        html = (STATIC_DIR / "index.html").read_text()
+        if view_only:
+            # Remove trade section entirely from DOM — don't just hide it
+            import re
+            html = re.sub(
+                r'<div id="tradeSection">.*?</div>\s*</div>',
+                '',
+                html,
+                flags=re.DOTALL,
+            )
+        return HTMLResponse(html)
 
     @app.get("/api/config")
     async def api_config():
@@ -114,6 +166,74 @@ def create_app(
     @app.get("/api/prices")
     async def api_prices():
         return dict(TopstepXAccountClient._current_prices)
+
+    @app.get("/api/account-stats")
+    async def api_account_stats():
+        wa: Optional[WebTradingAccount] = _last_web_account["data"]
+        if wa is None:
+            return {"error": "Not available yet"}
+        return {
+            "winRate": wa.win_rate,
+            "totalTrades": wa.total_trades,
+            "totalProfit": wa.total_profit,
+            "totalLoss": wa.total_loss,
+            "maximumLoss": wa.maximum_loss,
+            "highestBalance": wa.highest_balance,
+            "startOfDayBalance": wa.start_of_day_balance,
+            "realizedDayPnl": wa.realized_day_pnl,
+            "dailyLoss": wa.daily_loss,
+            "profitAndLoss": wa.profit_and_loss,
+            "startingBalance": wa.starting_balance,
+        }
+
+    @app.get("/api/balance-history")
+    async def api_balance_history(timeRange: str = Query(...)):
+        """Fetch daily balance + MLL history from the Topstep dashboard API.
+
+        Args:
+            timeRange: Date range, e.g. "2026-03-01:2026-03-07"
+        """
+        if not dashboard_client:
+            return {"error": "Dashboard client not configured (set TOPSTEP_REFRESH_TOKEN)"}
+
+        # Auto-discover the dashboard account ID from the TopstepX account ID
+        if _dash_account_id["value"] is None:
+            topstepx_id = get_account_id()
+            if topstepx_id is None:
+                return {"error": "No active TopstepX account"}
+            found = await dashboard_client.find_dashboard_account_id(topstepx_id)
+            if found is None:
+                return {"error": f"Could not map TopstepX account {topstepx_id} to dashboard"}
+            _dash_account_id["value"] = found
+            logger.info(f"Mapped TopstepX account {topstepx_id} -> dashboard account {found}")
+
+        try:
+            stats = await dashboard_client.get_account_stats(
+                _dash_account_id["value"], timeRange
+            )
+            return {
+                "balanceHistory": [
+                    {"tradeDay": e.trade_day, "balance": e.balance, "dailyProfit": e.daily_profit}
+                    for e in stats.balance_history
+                ],
+                "mllHistory": [
+                    {"tradeDay": e.trade_day, "maxLossLimit": e.max_loss_limit}
+                    for e in stats.mll_history
+                ],
+                "startingBalance": stats.starting_balance,
+                "currentMaxLossLimit": stats.current_max_loss_limit,
+                "targetBalance": stats.target_balance,
+                "performance": {
+                    "winRate": stats.performance.win_rate,
+                    "profitFactor": stats.performance.profit_factor,
+                    "sharpeRatio": stats.performance.sharpe_ratio,
+                    "averageWin": stats.performance.average_win,
+                    "averageLoss": stats.performance.average_loss,
+                } if stats.performance else None,
+            }
+        except Exception as e:
+            logger.error(f"Balance history error: {e}")
+            return {"error": str(e)}
 
     @app.get("/api/agent")
     async def api_agent():
