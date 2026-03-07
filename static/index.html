@@ -57,6 +57,15 @@
   .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
   .card .value.positive { color: var(--green); }
   .card .value.negative { color: var(--red); }
+  .card-sub { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+  .chart-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+    margin-bottom: 16px;
+    height: 220px;
+  }
 
   /* Positions table */
   .section-title {
@@ -267,6 +276,7 @@
     text-align: center;
   }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
@@ -275,16 +285,33 @@
   TopstepX Dashboard
   <span id="viewOnlyBadge" style="font-size:11px;color:var(--yellow);border:1px solid var(--yellow);padding:2px 8px;border-radius:4px;display:none">VIEW ONLY</span>
   <span id="cantTradeBadge" style="font-size:11px;color:var(--red);border:1px solid var(--red);padding:2px 8px;border-radius:4px;display:none">TRADING DISABLED</span>
+  <span id="marketBadge" style="font-size:11px;padding:2px 8px;border-radius:4px;display:none"></span>
   <span style="font-size:12px;color:var(--text-dim);margin-left:auto" id="accountName"></span>
 </h1>
 
 <div id="cantTradeBanner" style="display:none;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:6px;padding:10px 14px;margin-bottom:16px;color:var(--red);font-size:13px;font-weight:600">Account has hit the major loss limit — trading is disabled. Reset your account on TopstepX to continue.</div>
 
 <div class="cards">
-  <div class="card"><div class="label">Equity</div><div class="value" id="equity">--</div></div>
-  <div class="card"><div class="label">Balance</div><div class="value" id="balance">--</div></div>
-  <div class="card"><div class="label">Unrealized P&L</div><div class="value" id="pnl">--</div></div>
-  <div class="card"><div class="label">Positions</div><div class="value" id="posCount">0</div></div>
+  <div class="card">
+    <div class="label">Equity</div><div class="value" id="equity">--</div>
+    <div class="card-sub" id="balanceSub"></div>
+  </div>
+  <div class="card">
+    <div class="label">Unrealized P&L</div><div class="value" id="pnl">--</div>
+    <div class="card-sub"><span id="posCount">0</span> position(s)</div>
+  </div>
+  <div class="card">
+    <div class="label">Day P&L</div><div class="value" id="dayPnl">--</div>
+    <div class="card-sub" id="totalPnlSub"></div>
+  </div>
+  <div class="card">
+    <div class="label">Win Rate</div><div class="value" id="winRate">--</div>
+    <div class="card-sub" id="tradesSub"></div>
+  </div>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="equityChart"></canvas>
 </div>
 
 <div class="section-title">Open Positions</div>
@@ -333,7 +360,6 @@
 <div class="trade-controls">
   <select id="contractSelect">
     <option value="CON.F.US.MES.H26">MES H26</option>
-    <option value="CON.F.US.MNQ.H26">MNQ H26</option>
   </select>
   <input type="number" id="qtyInput" value="1" min="1" max="100" placeholder="Qty">
   <button class="btn btn-buy" onclick="placeTrade('buy')">BUY</button>
@@ -365,6 +391,175 @@ function log(msg, cls='') {
 let ws;
 let prices = {};
 let wsReconnectTimer = null;
+
+// ── Balance Chart ──────────────────────────────────────
+const balanceData = [];
+const balanceLabels = [];
+let mllData = [];
+let targetData = [];
+let lastKnownBalance = null;
+
+const DS_BALANCE = 0;
+const DS_MLL = 1;
+const DS_TARGET = 2;
+
+const balanceChart = new Chart($('equityChart'), {
+  type: 'line',
+  data: {
+    labels: balanceLabels,
+    datasets: [
+      {
+        label: 'Balance',
+        data: balanceData,
+        borderColor: '#58a6ff',
+        backgroundColor: 'rgba(88,166,255,0.08)',
+        borderWidth: 2,
+        pointRadius: 4,
+        pointBackgroundColor: '#58a6ff',
+        fill: true,
+        tension: 0,
+      },
+      {
+        label: 'MLL Floor',
+        data: mllData,
+        borderColor: '#f85149',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false,
+        spanGaps: true,
+        borderDash: [],
+      },
+      {
+        label: 'Profit Target',
+        data: targetData,
+        borderColor: '#3fb950',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false,
+        spanGaps: true,
+        borderDash: [],
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    interaction: { intersect: false, mode: 'index' },
+    plugins: {
+      legend: {
+        display: true,
+        labels: { color: '#8b949e', font: { size: 10 }, boxWidth: 12, padding: 12 },
+      },
+      tooltip: {
+        callbacks: {
+          label: ctx => ctx.dataset.label + ': $' + fmt(ctx.parsed.y),
+        },
+      },
+    },
+    scales: {
+      x: {
+        ticks: { color: '#8b949e', maxTicksLimit: 10, font: { size: 10 } },
+        grid: { color: 'rgba(48,54,61,0.5)' },
+      },
+      y: {
+        ticks: {
+          color: '#8b949e',
+          font: { size: 10 },
+          callback: v => '$' + v.toLocaleString(),
+        },
+        grid: { color: 'rgba(48,54,61,0.5)' },
+      },
+    },
+  },
+});
+
+async function loadBalanceHistory() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const resp = await fetch(`/api/balance-history?timeRange=2026-01-01:${today}`);
+    const data = await resp.json();
+    if (data.error) { console.error('Balance history API error:', data.error); return; }
+
+    balanceLabels.length = 0;
+    balanceData.length = 0;
+    mllData.length = 0;
+    targetData.length = 0;
+
+    const history = data.balanceHistory || [];
+    const mllHistory = data.mllHistory || [];
+    const startBal = data.startingBalance || 0;
+    const targetBal = data.targetBalance || null;
+    const currentMll = data.currentMaxLossLimit || null;
+
+    // First point: starting balance on "Start" day
+    balanceLabels.push('Start');
+    balanceData.push(startBal);
+    mllData.push(startBal - (startBal === 150000 ? 4500 : startBal === 50000 ? 2000 : 3000));
+    targetData.push(targetBal);
+
+    // Historical daily points
+    history.forEach(entry => {
+      const day = entry.tradeDay.slice(5, 10); // MM-DD
+      balanceLabels.push(day);
+      balanceData.push(entry.balance);
+
+      const mllEntry = mllHistory.find(m => m.tradeDay.slice(0, 10) === entry.tradeDay.slice(0, 10));
+      mllData.push(mllEntry ? mllEntry.maxLossLimit : currentMll);
+      targetData.push(targetBal);
+    });
+
+    if (history.length > 0) {
+      lastKnownBalance = history[history.length - 1].balance;
+    } else {
+      lastKnownBalance = startBal;
+    }
+
+    // Explicitly assign data arrays to chart datasets (ensures reference)
+    balanceChart.data.labels = balanceLabels;
+    balanceChart.data.datasets[0].data = balanceData;
+    balanceChart.data.datasets[1].data = mllData;
+    balanceChart.data.datasets[2].data = targetData;
+
+    // Set y-axis range to encompass all three lines
+    const allVals = [...balanceData, ...mllData, ...targetData].filter(v => v != null);
+    if (allVals.length > 0) {
+      const min = Math.min(...allVals);
+      const max = Math.max(...allVals);
+      const pad = (max - min) * 0.05 || 500;
+      balanceChart.options.scales.y.min = min - pad;
+      balanceChart.options.scales.y.max = max + pad;
+    }
+
+    console.log('Chart data loaded:', {balanceData, mllData, targetData, allVals});
+    balanceChart.update();
+  } catch(e) {
+    console.error('Failed to load balance history:', e);
+  }
+}
+
+function onBalanceChange(balance) {
+  if (balance == null || balance === lastKnownBalance) return;
+  lastKnownBalance = balance;
+
+  const label = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  balanceLabels.push(label);
+  balanceData.push(balance);
+
+  // Extend reference lines with their last values
+  mllData.push(mllData.length > 0 ? mllData[mllData.length - 1] : null);
+  targetData.push(targetData.length > 0 ? targetData[targetData.length - 1] : null);
+
+  balanceChart.update();
+}
+
+function updateMllLine(mll) {
+  if (mll == null) return;
+  if (mllData.length > 0) {
+    mllData[mllData.length - 1] = mll;
+    balanceChart.update();
+  }
+}
 
 function connectWS() {
   // Clean up any existing connection
@@ -405,12 +600,46 @@ function updateDashboard(data) {
   // Account info
   $('accountName').textContent = data.name || '';
   $('equity').textContent = '$' + fmt(data.equity);
-  $('balance').textContent = '$' + fmt(data.balance);
+  onBalanceChange(data.balance);
 
   // Trading disabled banner
   const canTrade = data.canTrade !== false;
   $('cantTradeBanner').style.display = canTrade ? 'none' : 'block';
   $('cantTradeBadge').style.display = canTrade ? 'none' : 'inline';
+
+  // Market open/closed badge
+  const mb = $('marketBadge');
+  if (data.market_open) {
+    mb.textContent = 'MARKET OPEN';
+    mb.style.color = 'var(--green)';
+    mb.style.borderColor = 'var(--green)';
+    mb.style.border = '1px solid var(--green)';
+  } else {
+    mb.textContent = 'MARKET CLOSED';
+    mb.style.color = 'var(--red)';
+    mb.style.border = '1px solid var(--red)';
+  }
+  mb.style.display = 'inline';
+
+  // Web account stats (richer data from userapi)
+  const wa = data.webAccount;
+  if (wa) {
+    $('balanceSub').textContent = 'Bal $' + fmt(data.balance) + ' | HWM $' + fmt(wa.highestBalance);
+
+    const dayPnl = wa.realizedDayPnl || 0;
+    const dayPnlEl = $('dayPnl');
+    dayPnlEl.textContent = (dayPnl >= 0 ? '+' : '') + '$' + fmt(dayPnl);
+    dayPnlEl.className = 'value ' + (dayPnl >= 0 ? 'positive' : 'negative');
+    const tPnl = wa.profitAndLoss || 0;
+    $('totalPnlSub').innerHTML = 'Total: <span style="color:' + (tPnl >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (tPnl >= 0 ? '+' : '') + '$' + fmt(tPnl) + '</span>';
+
+    const wr = wa.winRate || 0;
+    $('winRate').textContent = (wr * 100).toFixed(1) + '%';
+    $('tradesSub').textContent = (wa.totalTrades || 0) + ' trades';
+
+    // Update chart MLL line
+    updateMllLine(wa.maximumLoss);
+  }
 
   // Store prices
   if (data.prices) prices = data.prices;
@@ -608,6 +837,7 @@ fetch('/api/config').then(r => r.json()).then(cfg => {
     $('viewOnlyBadge').style.display = 'inline';
     $('tradeSection').style.display = 'none';
   }
+  loadBalanceHistory();
   connectWS();
 }).catch(() => connectWS());
 </script>

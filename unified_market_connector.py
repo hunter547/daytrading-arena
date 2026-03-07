@@ -91,6 +91,7 @@ class UnifiedMarketConnector:
         self._latest_quotes: dict[str, Quote] = {}
         self._cached_portfolio_line: str = "CURRENT POSITIONS: NONE — you are completely flat."
         self._portfolio_cache_time: float = 0.0
+        self._last_agent_publish: float = 0.0
 
         # Set adapter callbacks
         adapter._on_quote = self._on_quote
@@ -144,13 +145,18 @@ class UnifiedMarketConnector:
     ) -> None:
         """Publish directly to agent.
 
-        The agent's FuturesAgentRouterNode will set allow_text_output=False
-        to force OpenAI to return structured tool calls instead of text.
+        Enforces a minimum 10s gap between publishes to prevent message
+        backlog when the LLM processes slower than the publish rate.
 
         Args:
             user_prompt: The prompt to send to the agent
             deps: Optional dependencies dict
         """
+        now = time.time()
+        if now - self._last_agent_publish < 10:
+            return
+        self._last_agent_publish = now
+
         correlation_id = uuid_utils.uuid7().hex
 
         # Create event envelope (agent will add ModelRequestParameters)
@@ -328,11 +334,41 @@ class UnifiedMarketConnector:
         line = self._cached_portfolio_line
         return bool(line) and "NONE" not in line and "CURRENT POSITIONS:" in line
 
+    @staticmethod
+    def _is_market_open() -> bool:
+        """Check if futures market is open.
+
+        CME Micro E-mini futures trade Sunday 23:00 UTC through Friday 21:10 UTC,
+        with a daily maintenance break from 21:10 UTC to 23:00 UTC.
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        weekday = now.weekday()  # 0=Mon, 6=Sun
+        t = now.hour * 60 + now.minute  # minutes since midnight UTC
+
+        open_time = 23 * 60        # 23:00 UTC
+        close_time = 21 * 60 + 10  # 21:10 UTC
+
+        if weekday == 5:  # Saturday — always closed
+            return False
+        if weekday == 6:  # Sunday — only open after 23:00
+            return t >= open_time
+        if weekday == 4:  # Friday — only open until 21:10
+            return t < close_time
+
+        # Mon-Thu: closed during daily maintenance 21:10–23:00
+        if close_time <= t < open_time:
+            return False
+
+        return True
+
     async def _refresh_candles_loop(self) -> None:
         """Periodically fetch and publish historical candles.
 
         When positions are open, loops immediately (no sleep) so the LLM
-        can monitor and manage the trade in real time.
+        can monitor and manage the trade in real time. Does nothing outside
+        market hours to avoid wasting LLM tokens.
         """
         from datetime import timedelta
 
@@ -342,6 +378,10 @@ class UnifiedMarketConnector:
 
         while self._running:
             try:
+                if not self._is_market_open():
+                    await asyncio.sleep(60)
+                    continue
+
                 # Refresh portfolio cache before deciding sleep duration
                 await self._get_portfolio_line()
 
@@ -418,10 +458,11 @@ class UnifiedMarketConnector:
                 *[_fetch_one(g, lb, off, desc) for g, lb, off, desc in timeframes]
             )
 
-            candles = []  # track last successful fetch for price publish
+            latest_1m_candles = []
             for description, tf_candles in results:
                 if tf_candles:
-                    candles = tf_candles
+                    if "1-min" in description:
+                        latest_1m_candles = tf_candles
                     prompt_parts.append(f"\n{description}:")
                     prompt_parts.append("Time,Open,High,Low,Close,Volume")
                     for candle in tf_candles:
@@ -431,18 +472,8 @@ class UnifiedMarketConnector:
                             f"{candle.close},{candle.volume}"
                         )
 
-            # Publish latest candle close price for live dashboard PnL
-            if candles:
-                latest_price = candles[-1].close
-                try:
-                    if not self._broker._connection:
-                        await self._broker.start()
-                    await self._broker.publish(
-                        {"contract_id": symbol, "price": latest_price, "timestamp": now.isoformat()},
-                        topic=FUTURES_PRICE_TOPIC,
-                    )
-                except Exception as e:
-                    logger.debug(f"Error publishing candle price: {e}")
+            # Price for dashboard PnL comes from RTC SignalR only — do not
+            # publish candle close prices as they are stale and cause PnL flicker.
 
             # Get latest quote for this symbol
             quote = self._latest_quotes.get(symbol)

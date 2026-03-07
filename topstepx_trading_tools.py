@@ -241,23 +241,36 @@ class TopstepXTradingClient:
 
 _trading_client: Optional[TopstepXTradingClient] = None
 _practice_account_id: Optional[int] = None
+_web_client: Optional["TopstepXWebClient"] = None
+_dashboard_client: Optional["TopstepDashboardClient"] = None
 
 
 def _init_client():
     """Initialize trading client if not already initialized."""
-    global _trading_client, _practice_account_id
-    
+    global _trading_client, _practice_account_id, _web_client, _dashboard_client
+
     if _trading_client is not None:
         return
-    
+
     jwt_token = os.getenv("TOPSTEPX_JWT_TOKEN")
     if not jwt_token:
         logger.warning("TOPSTEPX_JWT_TOKEN not set - TopstepX trading disabled")
         return
-    
+
     api_url = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com")
     _trading_client = TopstepXTradingClient(jwt_token, api_url)
     logger.info("TopstepX trading client initialized")
+
+    from topstepx_web_client import TopstepXWebClient, TopstepDashboardClient
+    _web_client = TopstepXWebClient(jwt_token)
+    logger.info("TopstepX web client initialized")
+
+    dash_refresh = os.getenv("TOPSTEP_REFRESH_TOKEN", "").strip()
+    if dash_refresh:
+        _dashboard_client = TopstepDashboardClient(refresh_token=dash_refresh)
+        logger.info("Topstep dashboard client initialized")
+    else:
+        logger.info("TOPSTEP_REFRESH_TOKEN not set — dashboard stats disabled")
 
 
 async def _ensure_practice_account(force_refresh: bool = False):
@@ -987,6 +1000,8 @@ async def main():
             get_account_id=lambda: _practice_account_id,
             get_agent_state=get_agent_state,
             set_account_id=_set_account_id,
+            web_client=_web_client,
+            dashboard_client=_dashboard_client,
         )
 
         # Pre-bind socket with SO_REUSEADDR to survive fast container
@@ -1029,6 +1044,10 @@ async def main():
             await price_streamer.stop()
         if _trading_client:
             await _trading_client.close()
+        if _web_client:
+            await _web_client.close()
+        if _dashboard_client:
+            await _dashboard_client.close()
 
 
 if __name__ == "__main__":
