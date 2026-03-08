@@ -2,7 +2,7 @@
 # Pre-create all required Kafka topics on startup.
 # Runs inside the Kafka container via docker-compose.
 
-BROKER="localhost:9092"
+BROKER="${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}"
 
 TOPICS=(
   "agent_router.input"
@@ -31,10 +31,23 @@ for TOPIC in "${TOPICS[@]}"; do
   echo "  Topic: $TOPIC"
 done
 
-# ChatNode topic needs 2 partitions: one for the chatnode consumer, one for
-# the agent router's response listener (both join the same consumer group).
-kafka-topics --bootstrap-server "$BROKER" --create --if-not-exists \
-  --topic "ai_prompted.gpt5-nano" --partitions 2 --replication-factor 1 2>/dev/null
-echo "  Topic: ai_prompted.gpt5-nano (2 partitions)"
+# ChatNode topics (2 partitions each) — read model names from agents.yml
+# agents.yml is mounted at /agents.yml in the init-topics container
+AGENTS_FILE="/agents.yml"
+if [ -f "$AGENTS_FILE" ]; then
+  # Extract model names from the "models:" section (top-level keys with model_id children)
+  MODELS=$(awk '/^models:/{found=1;next} /^[a-z]/{found=0} found && /^  [a-z]/{gsub(/[: ]/,""); print}' "$AGENTS_FILE")
+  for MODEL in $MODELS; do
+    TOPIC="ai_prompted.${MODEL}"
+    kafka-topics --bootstrap-server "$BROKER" --create --if-not-exists \
+      --topic "$TOPIC" --partitions 2 --replication-factor 1 2>/dev/null
+    echo "  Topic: $TOPIC (2 partitions)"
+  done
+else
+  # Fallback: create default chatnode topic
+  kafka-topics --bootstrap-server "$BROKER" --create --if-not-exists \
+    --topic "ai_prompted.gpt5-nano" --partitions 2 --replication-factor 1 2>/dev/null
+  echo "  Topic: ai_prompted.gpt5-nano (2 partitions)"
+fi
 
 echo "All topics created."

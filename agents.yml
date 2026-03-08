@@ -1,0 +1,43 @@
+# Agent Arena Configuration
+# Each agent gets its own sim account (auto-created on first trade).
+# Agents sharing the same model reuse the same ChatNode process.
+#
+# Edit this file and restart the `agents` service:
+#   docker compose -f docker-compose.host-network.yml restart agents
+
+models:
+  gpt5-nano:
+    model_id: gpt-5-nano
+    api_key_env: OPENAI_API_KEY      # env var name containing the key
+    reasoning_effort: low
+    logo: openai                     # logo key used in dashboard
+    # base_url: null                  # default = OpenAI
+    # max_workers: 1
+
+  step-3.5-flash:
+    model_id: stepfun/step-3.5-flash:free
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: stepfun
+
+  # claude-sonnet:
+  #   model_id: anthropic/claude-sonnet-4-6
+  #   api_key_env: OPENROUTER_API_KEY
+  #   base_url: https://openrouter.ai/api/v1
+
+agents:
+  gpt-trader:
+    model: gpt5-nano
+    strategy: futures
+  
+  stepfun-trader:
+    model: step-3.5-flash
+    strategy: futures
+
+  # yolo-trader:
+  #   model: deepseek-r1
+  #   strategy: brainrot
+
+  # scalp-bot:
+  #   model: claude-sonnet
+  #   strategy: scalper

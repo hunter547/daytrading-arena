@@ -48,6 +48,7 @@ services:
         condition: service_healthy
     volumes:
       - ./create-topics.sh:/create-topics.sh
+      - ./agents.yml:/agents.yml:ro
     command: ["bash", "/create-topics.sh"]
     restart: "no"
 
@@ -79,7 +80,28 @@ services:
     volumes:
       - ./logs:/app/logs
 
-  # 4. TopstepX Trading Tools Service
+  # 4. MySQL (Simulated Trading Accounts)
+  mysql:
+    image: mysql:8.0
+    container_name: futures-mysql
+    network_mode: host
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_pass}
+      MYSQL_DATABASE: trading_arena
+      MYSQL_USER: trading
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-trading_pass}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # 5. TopstepX Trading Tools Service
   trading-tools:
     build:
       context: .
@@ -89,6 +111,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
       init-topics:
         condition: service_completed_successfully
     environment:
@@ -96,6 +120,11 @@ services:
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
       - TOPSTEPX_ENVIRONMENT=${TOPSTEPX_ENVIRONMENT:-demo}
+      - MYSQL_HOST=localhost
+      - MYSQL_PORT=3306
+      - MYSQL_USER=trading
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-trading_pass}
+      - MYSQL_DATABASE=trading_arena
       - SERVICE_NAME=topstepx_trading_tools
       - DASHBOARD_PORT=8080
       - DASHBOARD_VIEW_ONLY=${DASHBOARD_VIEW_ONLY:-true}
@@ -104,6 +133,7 @@ services:
       - AGENT_STRATEGY=futures
       - TOPSTEPX_STREAM_SYMBOLS=CON.F.US.MES.H26
       - TOPSTEP_REFRESH_TOKEN=${TOPSTEP_REFRESH_TOKEN:-}
+      - MIRROR_AGENT=${MIRROR_AGENT:-}
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers localhost:9092
@@ -136,60 +166,36 @@ services:
     profiles:
       - crypto
 
-  # 6. ChatNode (LLM Inference - GPT-5 Nano)
-  chatnode:
+  # 6. Agent Launcher (reads agents.yml, spawns ChatNodes + Agent Routers)
+  agents:
     build:
       context: .
       network: host
-    container_name: futures-chatnode
+    container_name: futures-agents
     network_mode: host
     depends_on:
       kafka:
         condition: service_healthy
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SERVICE_NAME=deploy_chat_node
-    command: >
-      python deploy_chat_node.py
-      --name gpt5-nano
-      --model-id gpt-5-nano
-      --bootstrap-servers localhost:9092
-      --reasoning-effort low
-    restart: unless-stopped
-    volumes:
-      - ./logs:/app/logs
-
-  # 7. Agent Router (Futures Trader)
-  agent:
-    build:
-      context: .
-      network: host
-    container_name: futures-agent
-    network_mode: host
-    depends_on:
-      kafka:
-        condition: service_healthy
-      chatnode:
-        condition: service_started
+      init-topics:
+        condition: service_completed_successfully
       market-connector:
         condition: service_started
       trading-tools:
         condition: service_started
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-      - SERVICE_NAME=deploy_router_node
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - SERVICE_NAME=agent_launcher
     command: >
-      python deploy_router_node.py
-      --name futures-trader
-      --chat-node-name gpt5-nano
-      --strategy futures
+      python agent_launcher.py
       --bootstrap-servers localhost:9092
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
+      - ./agents.yml:/app/agents.yml:ro
 
-  # 8. Response Viewer (Optional - Agent Activity Monitor)
+  # 7. Response Viewer (Optional - Agent Activity Monitor)
   response-viewer:
     build:
       context: .
@@ -213,4 +219,6 @@ services:
 
 volumes:
   logs:
+    driver: local
+  mysql-data:
     driver: local
