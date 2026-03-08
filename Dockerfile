@@ -25,6 +25,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install TopstepX optional dependencies
 RUN pip install --no-cache-dir signalrcore>=0.9.5
 
+# Install MySQL async driver + cryptography for caching_sha2_password auth
+RUN pip install --no-cache-dir aiomysql>=0.2.0 cryptography>=42.0
+
+# Install YAML parser (for agents.yml)
+RUN pip install --no-cache-dir pyyaml>=6.0
+
 # Create logs directory
 RUN mkdir -p logs
 

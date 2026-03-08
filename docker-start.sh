@@ -37,48 +37,41 @@ if [ -z "$TOPSTEPX_API_KEY" ]; then
 fi
 
 echo ""
+echo "Taking down existing compose containers if they are running..."
+docker compose -f docker-compose.host-network.yml down
+
+echo ""
 echo "Building Docker images (this may take a few minutes)..."
-docker-compose build
+docker compose -f docker-compose.host-network.yml build
 
 echo ""
 echo "Starting all services..."
 echo ""
-
-# Ask user if they want response viewer
-read -p "Start with Response Viewer? (shows live agent reasoning) [y/N]: " -n 1 -r
-echo ""
-
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    docker-compose --profile monitoring up -d
-    VIEWER_MSG="📺 Response Viewer: docker-compose logs -f response-viewer"
-else
-    docker-compose up -d
-    VIEWER_MSG="💡 To start Response Viewer later: docker-compose --profile monitoring up -d response-viewer"
-fi
+docker compose -f docker-compose.host-network.yml up -d
 
 echo ""
 echo "⏳ Waiting for services to start..."
-sleep 5
+sleep 10
 
 # Check service health
 echo ""
 echo "📊 Service Status:"
-docker-compose ps
+docker compose ps
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ System Started Successfully!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "🌐 Dashboard:     http://localhost:8501"
+echo "🌐 Dashboard:     http://localhost:8080"
 echo ""
 echo "📋 Useful Commands:"
-echo "  View all logs:       docker-compose logs -f"
-echo "  View agent logs:     docker-compose logs -f agent"
-echo "  View market data:    docker-compose logs -f market-connector"
-echo "  $VIEWER_MSG"
-echo "  Check status:        docker-compose ps"
-echo "  Stop services:       docker-compose down"
+echo "  View all logs:       docker compose logs -f"
+echo "  View agent logs:     docker compose logs -f agent"
+echo "  View market data:    docker compose logs -f market-connector"
+echo "  View dash logs:      docker compose logs -f trading-tools" 
+echo "  Check status:        docker compose ps"
+echo "  Stop services:       docker compose down"
 echo ""
 echo "📖 Full docs: See DOCKER_SETUP.md"
 echo ""

@@ -22,3 +22,6 @@ dependencies = [
 topstepx = [
     "signalrcore>=0.9.5",  # Required for TopstepX SignalR WebSocket
 ]
+sim = [
+    "aiomysql>=0.2.0",  # MySQL async driver for simulated accounts
+]

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TopstepX Dashboard</title>
+<title>TopstepX Agent Arena</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -31,6 +31,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
   .status-dot {
     width: 8px; height: 8px;
@@ -40,101 +41,189 @@
   }
   .status-dot.connected { background: var(--green); }
 
-  /* Cards */
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px;
+  /* Per-agent dashboard card */
+  .agent-dashboard {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 16px;
     margin-bottom: 16px;
   }
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 14px;
+  .agent-dashboard.blown {
+    border-color: var(--red);
+    background: rgba(248,81,73,0.03);
   }
-  .card .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-  .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .card .value.positive { color: var(--green); }
-  .card .value.negative { color: var(--red); }
-  .card-sub { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
-  .chart-wrap {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 14px;
-    margin-bottom: 16px;
-    height: 220px;
+  .agent-dash-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
   }
-
-  /* Positions table */
-  .section-title {
-    font-size: 13px;
-    color: var(--text-dim);
+  .agent-dash-name { font-weight: 700; font-size: 16px; }
+  .agent-dash-meta { font-size: 11px; color: var(--text-dim); }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 8px;
-    margin-top: 16px;
+    letter-spacing: 0.5px;
   }
-  .table-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    border-radius: 6px;
+  .badge-bullish { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid var(--green); }
+  .badge-bearish { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid var(--red); }
+  .badge-neutral { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid var(--border); }
+  .badge-mirror { background: rgba(227,164,85,0.12); border: 1px solid #e3a455; }
+  .badge-mirror span { background: linear-gradient(#f6dba6 25%, #e3a455 80%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+  /* Stat cards within agent */
+  .stat-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .stat-card {
+    background: var(--bg);
     border: 1px solid var(--border);
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    background: var(--surface);
-    min-width: 600px;
-  }
-  th {
-    text-align: left;
+    border-radius: 6px;
     padding: 10px 12px;
+  }
+  .stat-card .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat-card .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .stat-card .value.positive { color: var(--green); }
+  .stat-card .value.negative { color: var(--red); }
+  .stat-card .sub { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
+
+  /* Positions within agent */
+  .agent-positions {
+    margin-bottom: 12px;
+  }
+  .section-label {
     font-size: 11px;
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 1px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    white-space: nowrap;
+    margin-bottom: 6px;
+    margin-top: 10px;
   }
-  td {
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  tr:last-child td { border-bottom: none; }
-
-  /* Mobile card layout */
-  .pos-cards { display: none; }
-  .pos-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px;
-    margin-bottom: 8px;
-  }
-  .pos-card-header {
+  .pos-row {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    margin-bottom: 8px;
-  }
-  .pos-card-symbol { font-weight: 700; font-size: 14px; }
-  .pos-card-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px 12px;
+    gap: 12px;
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 4px;
     font-size: 12px;
+    flex-wrap: wrap;
   }
-  .pos-card-grid .label { color: var(--text-dim); }
-  .pos-card-actions { margin-top: 10px; }
+  .pos-row .symbol { font-weight: 700; min-width: 160px; }
+  .pos-row .side { font-weight: 600; min-width: 70px; }
+  .pos-row .detail { color: var(--text-dim); min-width: 100px; }
+  .pos-row .pnl { font-weight: 600; min-width: 90px; }
+  .no-positions-msg {
+    padding: 10px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
 
-  @media (max-width: 640px) {
-    .table-wrap { display: none; }
-    .pos-cards { display: block; }
+  /* Blown banner within agent */
+  .blown-banner {
+    background: rgba(248,81,73,0.1);
+    border: 1px solid var(--red);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    color: var(--red);
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
+  .practice-blown-banner {
+    background: rgba(210,153,34,0.1);
+    border: 1px solid var(--yellow);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    color: var(--yellow);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  /* Reasoning & activity */
+  .reasoning-block {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 160px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 10px;
+  }
+  .activity-feed {
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .activity-entry {
+    display: flex;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    align-items: flex-start;
+  }
+  .activity-entry:last-child { border-bottom: none; }
+  .activity-time { color: var(--text-dim); white-space: nowrap; min-width: 55px; }
+  .activity-kind {
+    font-weight: 600;
+    white-space: nowrap;
+    min-width: 80px;
+  }
+  .activity-kind.tool-call { color: var(--yellow); }
+  .activity-kind.response { color: var(--green); }
+  .activity-kind.tool-result { color: var(--blue); }
+  .activity-details {
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    flex: 1;
+  }
+  .agent-waiting {
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  /* Collapsible sections */
+  .toggle-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 2px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 10px;
+    margin-left: auto;
+  }
+  .toggle-btn:hover { color: var(--text); border-color: var(--text-dim); }
+
   .btn {
     padding: 6px 14px;
     border: none;
@@ -150,6 +239,7 @@
   .btn-buy { background: var(--green); color: #000; }
   .btn-sell { background: var(--red); color: #fff; }
   .btn-close { background: var(--yellow); color: #000; }
+  .btn-reset { background: var(--red); color: #fff; font-size: 11px; padding: 4px 10px; }
   .btn-sm { padding: 4px 10px; font-size: 11px; }
 
   /* Trade controls */
@@ -171,7 +261,7 @@
   }
   .trade-controls input { width: 80px; }
 
-  /* Status log */
+  /* Activity log */
   #log {
     margin-top: 16px;
     background: var(--surface);
@@ -186,178 +276,25 @@
   #log .entry { margin-bottom: 4px; }
   #log .entry.success { color: var(--green); }
   #log .entry.error { color: var(--red); }
-  .no-positions {
-    padding: 20px;
-    text-align: center;
-    color: var(--text-dim);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-  }
-  .table-wrap .no-positions, table .no-positions {
-    border: none;
-    border-radius: 0;
-  }
-
-  /* Agent panel */
-  .agent-section {
-    margin-top: 20px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface);
-    padding: 14px;
-  }
-  .agent-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-  }
-  .agent-name { font-weight: 700; font-size: 15px; }
-  .agent-meta { font-size: 11px; color: var(--text-dim); }
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .badge-bullish { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid var(--green); }
-  .badge-bearish { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid var(--red); }
-  .badge-neutral { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid var(--border); }
-  .reasoning-block {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 10px 12px;
-    font-size: 12px;
-    line-height: 1.5;
-    max-height: 200px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    margin-bottom: 12px;
-  }
-  .activity-feed {
-    max-height: 260px;
-    overflow-y: auto;
-  }
-  .activity-entry {
-    display: flex;
-    gap: 8px;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
-    align-items: flex-start;
-  }
-  .activity-entry:last-child { border-bottom: none; }
-  .activity-time { color: var(--text-dim); white-space: nowrap; min-width: 60px; }
-  .activity-kind {
-    font-weight: 600;
-    white-space: nowrap;
-    min-width: 85px;
-  }
-  .activity-kind.tool-call { color: var(--yellow); }
-  .activity-kind.response { color: var(--green); }
-  .activity-kind.tool-result { color: var(--blue); }
-  .activity-details {
-    color: var(--text-dim);
-    white-space: pre-wrap;
-    word-break: break-word;
-    flex: 1;
-  }
-  .agent-waiting {
-    color: var(--text-dim);
-    font-size: 12px;
-    padding: 16px;
-    text-align: center;
-  }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 
 <h1>
   <span class="status-dot" id="wsDot"></span>
-  TopstepX Dashboard
+  <span style="-webkit-text-fill-color:transparent;background:linear-gradient(#f6dba6 25%,#e3a455 80%);-webkit-background-clip:text;background-clip:text;">TopstepX Agent Arena</span>
   <span id="viewOnlyBadge" style="font-size:11px;color:var(--yellow);border:1px solid var(--yellow);padding:2px 8px;border-radius:4px;display:none">VIEW ONLY</span>
-  <span id="cantTradeBadge" style="font-size:11px;color:var(--red);border:1px solid var(--red);padding:2px 8px;border-radius:4px;display:none">TRADING DISABLED</span>
   <span id="marketBadge" style="font-size:11px;padding:2px 8px;border-radius:4px;display:none"></span>
-  <span style="font-size:12px;color:var(--text-dim);margin-left:auto" id="accountName"></span>
 </h1>
 
-<div id="cantTradeBanner" style="display:none;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:6px;padding:10px 14px;margin-bottom:16px;color:var(--red);font-size:13px;font-weight:600">Account has hit the major loss limit — trading is disabled. Reset your account on TopstepX to continue.</div>
-
-<div class="cards">
-  <div class="card">
-    <div class="label">Equity</div><div class="value" id="equity">--</div>
-    <div class="card-sub" id="balanceSub"></div>
-  </div>
-  <div class="card">
-    <div class="label">Unrealized P&L</div><div class="value" id="pnl">--</div>
-    <div class="card-sub"><span id="posCount">0</span> position(s)</div>
-  </div>
-  <div class="card">
-    <div class="label">Day P&L</div><div class="value" id="dayPnl">--</div>
-    <div class="card-sub" id="totalPnlSub"></div>
-  </div>
-  <div class="card">
-    <div class="label">Win Rate</div><div class="value" id="winRate">--</div>
-    <div class="card-sub" id="tradesSub"></div>
-  </div>
-</div>
-
-<div class="chart-wrap">
-  <canvas id="equityChart"></canvas>
-</div>
-
-<div class="section-title">Open Positions</div>
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th>Contract</th>
-        <th>Side</th>
-        <th>Qty</th>
-        <th>Avg Price</th>
-        <th>Market Price</th>
-        <th>Unrealized P&L</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody id="positionsBody">
-      <tr><td colspan="7" class="no-positions">No open positions</td></tr>
-    </tbody>
-  </table>
-</div>
-<div class="pos-cards" id="positionsCards">
-  <div class="no-positions">No open positions</div>
-</div>
-
-<div class="section-title">Agent Activity</div>
-<div class="agent-section" id="agentSection">
-  <div class="agent-waiting" id="agentWaiting">Waiting for agent activity...</div>
-  <div id="agentContent" style="display:none">
-    <div class="agent-header">
-      <span class="agent-name" id="agentName">--</span>
-      <span class="badge badge-neutral" id="sentimentBadge">NEUTRAL</span>
-      <span class="agent-meta" id="agentModel"></span>
-      <span class="agent-meta" id="agentStrategy"></span>
-      <span class="agent-meta" style="margin-left:auto" id="agentLastActive"></span>
-    </div>
-    <div class="section-title" style="margin-top:0">Latest Reasoning</div>
-    <div class="reasoning-block" id="agentReasoning">--</div>
-    <div class="section-title" style="margin-top:0">Recent Activity</div>
-    <div class="activity-feed" id="activityFeed"></div>
-  </div>
+<div id="agentsContainer">
+  <div class="agent-waiting">Loading agent data...</div>
 </div>
 
 <div id="tradeSection">
-<div class="section-title">Trade</div>
+<div class="section-label" style="margin-top:16px">Manual Trade</div>
 <div class="trade-controls">
+  <select id="agentSelect"></select>
   <select id="contractSelect">
     <option value="CON.F.US.MES.H26">MES H26</option>
   </select>
@@ -367,7 +304,7 @@
 </div>
 </div>
 
-<div class="section-title">Activity Log</div>
+<div class="section-label" style="margin-top:16px">Activity Log</div>
 <div id="log"></div>
 
 <script>
@@ -378,195 +315,41 @@ const fmt = (n, decimals=2) => {
 };
 
 let viewOnly = false;
+let currentPrices = {};
+let mirrorAgent = '';
+let knownAgents = [];
 
 function log(msg, cls='') {
   const el = $('log');
   const ts = new Date().toLocaleTimeString();
   el.innerHTML = `<div class="entry ${cls}">[${ts}] ${msg}</div>` + el.innerHTML;
-  // Keep max 50 entries
   while (el.children.length > 50) el.removeChild(el.lastChild);
 }
 
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Logo SVGs ──────────────────────────────────────────
+const logoSvgs = {
+  openai: '<svg style="width:16px;height:16px;vertical-align:-2px;margin-right:5px;fill:var(--text)" viewBox="0 0 158.7128 157.296" xmlns="http://www.w3.org/2000/svg"><path d="M60.8734,57.2556v-14.9432c0-1.2586.4722-2.2029,1.5728-2.8314l30.0443-17.3023c4.0899-2.3593,8.9662-3.4599,13.9988-3.4599,18.8759,0,30.8307,14.6289,30.8307,30.2006,0,1.1007,0,2.3593-.158,3.6178l-31.1446-18.2467c-1.8872-1.1006-3.7754-1.1006-5.6629,0l-39.4812,22.9651ZM131.0276,115.4561v-35.7074c0-2.2028-.9446-3.7756-2.8318-4.8763l-39.481-22.9651,12.8982-7.3934c1.1007-.6285,2.0453-.6285,3.1458,0l30.0441,17.3024c8.6523,5.0341,14.4708,15.7296,14.4708,26.1107,0,11.9539-7.0769,22.965-18.2461,27.527v.0021ZM51.593,83.9964l-12.8982-7.5497c-1.1007-.6285-1.5728-1.5728-1.5728-2.8314v-34.6048c0-16.8303,12.8982-29.5722,30.3585-29.5722,6.607,0,12.7403,2.2029,17.9324,6.1349l-30.987,17.9324c-1.8871,1.1007-2.8314,2.6735-2.8314,4.8764v45.6159l-.0014-.0015ZM79.3562,100.0403l-18.4829-10.3811v-22.0209l18.4829-10.3811,18.4812,10.3811v22.0209l-18.4812,10.3811ZM91.2319,147.8591c-6.607,0-12.7403-2.2031-17.9324-6.1344l30.9866-17.9333c1.8872-1.1005,2.8318-2.6728,2.8318-4.8759v-45.616l13.0564,7.5498c1.1005.6285,1.5723,1.5728,1.5723,2.8314v34.6051c0,16.8297-13.0564,29.5723-30.5147,29.5723v.001ZM53.9522,112.7822l-30.0443-17.3024c-8.652-5.0343-14.471-15.7296-14.471-26.1107,0-12.1119,7.2356-22.9652,18.403-27.5272v35.8634c0,2.2028.9443,3.7756,2.8314,4.8763l39.3248,22.8068-12.8982,7.3938c-1.1007.6287-2.045.6287-3.1456,0ZM52.2229,138.5791c-17.7745,0-30.8306-13.3713-30.8306-29.8871,0-1.2585.1578-2.5169.3143-3.7754l30.987,17.9323c1.8871,1.1005,3.7757,1.1005,5.6628,0l39.4811-22.807v14.9435c0,1.2585-.4721,2.2021-1.5728,2.8308l-30.0443,17.3025c-4.0898,2.359-8.9662,3.4605-13.9989,3.4605h.0014ZM91.2319,157.296c19.0327,0,34.9188-13.5272,38.5383-31.4594,17.6164-4.562,28.9425-21.0779,28.9425-37.908,0-11.0112-4.719-21.7066-13.2133-29.4143.7867-3.3035,1.2595-6.607,1.2595-9.909,0-22.4929-18.2471-39.3247-39.3251-39.3247-4.2461,0-8.3363.6285-12.4262,2.045-7.0792-6.9213-16.8318-11.3254-27.5271-11.3254-19.0331,0-34.9191,13.5268-38.5384,31.4591C11.3255,36.0212,0,52.5373,0,69.3675c0,11.0112,4.7184,21.7065,13.2125,29.4142-.7865,3.3035-1.2586,6.6067-1.2586,9.9092,0,22.4923,18.2466,39.3241,39.3248,39.3241,4.2462,0,8.3362-.6277,12.426-2.0441,7.0776,6.921,16.8302,11.3251,27.5271,11.3251Z"/></svg>',
+  stepfun: '<svg style="width:16px;height:16px;vertical-align:-2px;margin-right:5px;" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M22.012 0h1.032v.927H24v.968h-.956V3.78h-1.032V1.896h-1.878v-.97h1.878V0zM2.6 12.371V1.87h.969v10.502h-.97zm10.423.66h10.95v.918h-6.208v9.579h-4.742V13.03zM5.629 3.333v12.356H0v4.51h10.386V8L20.859 8l-.003-4.668-15.227.001z" fill="url(#lobe-icons-stepfun-fill)" fill-rule="evenodd"></path><defs><linearGradient gradientUnits="userSpaceOnUse" id="lobe-icons-stepfun-fill" x1="1.646" x2="18.342" y1="1.916" y2="22.091"><stop stop-color="#01A9FF"></stop><stop offset="1" stop-color="#0160FF"></stop></linearGradient></defs></svg>',
+  anthropic: '<svg style="width:16px;height:16px;vertical-align:-2px;margin-right:5px;fill:var(--text)" viewBox="0 0 256 176" xmlns="http://www.w3.org/2000/svg"><path d="M147.487 0L256 176h-62.27l-46.243-76.044L147.487 0ZM0 176L108.513 0l42.182 99.956L108.513 176H46.243l62.27-76.044L66.331 176H0Z"/></svg>',
+  google: '<svg style="width:16px;height:16px;vertical-align:-2px;margin-right:5px" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>',
+  deepseek: '<svg style="width:16px;height:16px;vertical-align:-2px;margin-right:5px" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"><rect width="120" height="120" rx="24" fill="#4D6BFE"/><path d="M35 40h50v8H35V40Zm8 16h34v8H43V56Zm-8 16h50v8H35V72Z" fill="#fff"/></svg>',
+  meta: '<svg style="width:16px;height:16px;vertical-align:-2px;margin-right:5px" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"><rect width="120" height="120" rx="24" fill="#0668E1"/><path d="M38 82c-6 0-10-4.5-10-12 0-12.5 12-28 22-28 5 0 7.5 3 10 8l4.5 10 4.5-10c2.5-5 5-8 10-8 10 0 22 15.5 22 28 0 7.5-4 12-10 12-6.5 0-9.5-4-14-12l-8-16h-9l-8 16c-4.5 8-7.5 12-14 12Z" fill="#fff"/></svg>',
+};
+function getLogoSvg(key) { return logoSvgs[key] || logoSvgs.openai; }
+
 // ── WebSocket ──────────────────────────────────────────
 let ws;
-let prices = {};
 let wsReconnectTimer = null;
 
-// ── Balance Chart ──────────────────────────────────────
-const balanceData = [];
-const balanceLabels = [];
-let mllData = [];
-let targetData = [];
-let lastKnownBalance = null;
-
-const DS_BALANCE = 0;
-const DS_MLL = 1;
-const DS_TARGET = 2;
-
-const balanceChart = new Chart($('equityChart'), {
-  type: 'line',
-  data: {
-    labels: balanceLabels,
-    datasets: [
-      {
-        label: 'Balance',
-        data: balanceData,
-        borderColor: '#58a6ff',
-        backgroundColor: 'rgba(88,166,255,0.08)',
-        borderWidth: 2,
-        pointRadius: 4,
-        pointBackgroundColor: '#58a6ff',
-        fill: true,
-        tension: 0,
-      },
-      {
-        label: 'MLL Floor',
-        data: mllData,
-        borderColor: '#f85149',
-        borderWidth: 2,
-        pointRadius: 0,
-        fill: false,
-        spanGaps: true,
-        borderDash: [],
-      },
-      {
-        label: 'Profit Target',
-        data: targetData,
-        borderColor: '#3fb950',
-        borderWidth: 2,
-        pointRadius: 0,
-        fill: false,
-        spanGaps: true,
-        borderDash: [],
-      },
-    ],
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    interaction: { intersect: false, mode: 'index' },
-    plugins: {
-      legend: {
-        display: true,
-        labels: { color: '#8b949e', font: { size: 10 }, boxWidth: 12, padding: 12 },
-      },
-      tooltip: {
-        callbacks: {
-          label: ctx => ctx.dataset.label + ': $' + fmt(ctx.parsed.y),
-        },
-      },
-    },
-    scales: {
-      x: {
-        ticks: { color: '#8b949e', maxTicksLimit: 10, font: { size: 10 } },
-        grid: { color: 'rgba(48,54,61,0.5)' },
-      },
-      y: {
-        ticks: {
-          color: '#8b949e',
-          font: { size: 10 },
-          callback: v => '$' + v.toLocaleString(),
-        },
-        grid: { color: 'rgba(48,54,61,0.5)' },
-      },
-    },
-  },
-});
-
-async function loadBalanceHistory() {
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-    const resp = await fetch(`/api/balance-history?timeRange=2026-01-01:${today}`);
-    const data = await resp.json();
-    if (data.error) { console.error('Balance history API error:', data.error); return; }
-
-    balanceLabels.length = 0;
-    balanceData.length = 0;
-    mllData.length = 0;
-    targetData.length = 0;
-
-    const history = data.balanceHistory || [];
-    const mllHistory = data.mllHistory || [];
-    const startBal = data.startingBalance || 0;
-    const targetBal = data.targetBalance || null;
-    const currentMll = data.currentMaxLossLimit || null;
-
-    // First point: starting balance on "Start" day
-    balanceLabels.push('Start');
-    balanceData.push(startBal);
-    mllData.push(startBal - (startBal === 150000 ? 4500 : startBal === 50000 ? 2000 : 3000));
-    targetData.push(targetBal);
-
-    // Historical daily points
-    history.forEach(entry => {
-      const day = entry.tradeDay.slice(5, 10); // MM-DD
-      balanceLabels.push(day);
-      balanceData.push(entry.balance);
-
-      const mllEntry = mllHistory.find(m => m.tradeDay.slice(0, 10) === entry.tradeDay.slice(0, 10));
-      mllData.push(mllEntry ? mllEntry.maxLossLimit : currentMll);
-      targetData.push(targetBal);
-    });
-
-    if (history.length > 0) {
-      lastKnownBalance = history[history.length - 1].balance;
-    } else {
-      lastKnownBalance = startBal;
-    }
-
-    // Explicitly assign data arrays to chart datasets (ensures reference)
-    balanceChart.data.labels = balanceLabels;
-    balanceChart.data.datasets[0].data = balanceData;
-    balanceChart.data.datasets[1].data = mllData;
-    balanceChart.data.datasets[2].data = targetData;
-
-    // Set y-axis range to encompass all three lines
-    const allVals = [...balanceData, ...mllData, ...targetData].filter(v => v != null);
-    if (allVals.length > 0) {
-      const min = Math.min(...allVals);
-      const max = Math.max(...allVals);
-      const pad = (max - min) * 0.05 || 500;
-      balanceChart.options.scales.y.min = min - pad;
-      balanceChart.options.scales.y.max = max + pad;
-    }
-
-    console.log('Chart data loaded:', {balanceData, mllData, targetData, allVals});
-    balanceChart.update();
-  } catch(e) {
-    console.error('Failed to load balance history:', e);
-  }
-}
-
-function onBalanceChange(balance) {
-  if (balance == null || balance === lastKnownBalance) return;
-  lastKnownBalance = balance;
-
-  const label = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  balanceLabels.push(label);
-  balanceData.push(balance);
-
-  // Extend reference lines with their last values
-  mllData.push(mllData.length > 0 ? mllData[mllData.length - 1] : null);
-  targetData.push(targetData.length > 0 ? targetData[targetData.length - 1] : null);
-
-  balanceChart.update();
-}
-
-function updateMllLine(mll) {
-  if (mll == null) return;
-  if (mllData.length > 0) {
-    mllData[mllData.length - 1] = mll;
-    balanceChart.update();
-  }
-}
-
 function connectWS() {
-  // Clean up any existing connection
   if (ws) {
-    ws.onclose = null;  // Prevent recursive reconnect
-    ws.onerror = null;
-    ws.onmessage = null;
+    ws.onclose = null; ws.onerror = null; ws.onmessage = null;
     try { ws.close(); } catch(e) {}
     ws = null;
   }
@@ -583,261 +366,314 @@ function connectWS() {
     $('wsDot').classList.remove('connected');
     wsReconnectTimer = setTimeout(connectWS, 500);
   };
-  ws.onerror = () => {};  // Let onclose handle reconnection
+  ws.onerror = () => {};
   ws.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
-      if (data.error) { log(data.error, 'error'); return; }
-      try { updateDashboard(data); } catch(err) { console.error('Dashboard update error:', err); }
-      try { if (data.agent) updateAgent(data.agent); } catch(err) { console.error('Agent update error:', err); }
+      if (data.prices) currentPrices = data.prices;
+      if (data.mirror_agent) mirrorAgent = data.mirror_agent;
+
+      // Market badge
+      const mb = $('marketBadge');
+      if (data.market_open) {
+        mb.textContent = 'MARKET OPEN';
+        mb.style.color = 'var(--green)';
+        mb.style.border = '1px solid var(--green)';
+      } else {
+        mb.textContent = 'MARKET CLOSED';
+        mb.style.color = 'var(--red)';
+        mb.style.border = '1px solid var(--red)';
+      }
+      mb.style.display = 'inline';
+
+      if (data.agents) renderAgents(data.agents);
     } catch(err) {
       console.error('WS parse error', err);
     }
   };
 }
 
-function updateDashboard(data) {
-  // Account info
-  $('accountName').textContent = data.name || '';
-  $('equity').textContent = '$' + fmt(data.equity);
-  onBalanceChange(data.balance);
+// ── Render all agent dashboards ────────────────────────
+function renderAgents(agents) {
+  const container = $('agentsContainer');
+  const names = Object.keys(agents).sort();
 
-  // Trading disabled banner
-  const canTrade = data.canTrade !== false;
-  $('cantTradeBanner').style.display = canTrade ? 'none' : 'block';
-  $('cantTradeBadge').style.display = canTrade ? 'none' : 'inline';
-
-  // Market open/closed badge
-  const mb = $('marketBadge');
-  if (data.market_open) {
-    mb.textContent = 'MARKET OPEN';
-    mb.style.color = 'var(--green)';
-    mb.style.borderColor = 'var(--green)';
-    mb.style.border = '1px solid var(--green)';
-  } else {
-    mb.textContent = 'MARKET CLOSED';
-    mb.style.color = 'var(--red)';
-    mb.style.border = '1px solid var(--red)';
-  }
-  mb.style.display = 'inline';
-
-  // Web account stats (richer data from userapi)
-  const wa = data.webAccount;
-  if (wa) {
-    $('balanceSub').textContent = 'Bal $' + fmt(data.balance) + ' | HWM $' + fmt(wa.highestBalance);
-
-    const dayPnl = wa.realizedDayPnl || 0;
-    const dayPnlEl = $('dayPnl');
-    dayPnlEl.textContent = (dayPnl >= 0 ? '+' : '') + '$' + fmt(dayPnl);
-    dayPnlEl.className = 'value ' + (dayPnl >= 0 ? 'positive' : 'negative');
-    const tPnl = wa.profitAndLoss || 0;
-    $('totalPnlSub').innerHTML = 'Total: <span style="color:' + (tPnl >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (tPnl >= 0 ? '+' : '') + '$' + fmt(tPnl) + '</span>';
-
-    const wr = wa.winRate || 0;
-    $('winRate').textContent = (wr * 100).toFixed(1) + '%';
-    $('tradesSub').textContent = (wa.totalTrades || 0) + ' trades';
-
-    // Update chart MLL line
-    updateMllLine(wa.maximumLoss);
+  // Update agent select dropdown for manual trading
+  const agentSelect = $('agentSelect');
+  if (agentSelect && names.join(',') !== knownAgents.join(',')) {
+    knownAgents = names;
+    agentSelect.innerHTML = names.map(n =>
+      '<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + '</option>'
+    ).join('');
   }
 
-  // Store prices
-  if (data.prices) prices = data.prices;
-
-  // Positions
-  const positions = data.positions || [];
-  $('posCount').textContent = positions.length;
-
-  let totalPnl = 0;
-  positions.forEach(p => totalPnl += (p.unrealizedPnL || 0));
-
-  const pnlEl = $('pnl');
-  pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + fmt(totalPnl);
-  pnlEl.className = 'value ' + (totalPnl >= 0 ? 'positive' : 'negative');
-
-  const equityEl = $('equity');
-  equityEl.className = 'value';
-
-  // Positions table + mobile cards
-  const tbody = $('positionsBody');
-  const cards = $('positionsCards');
-  if (positions.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="no-positions">No open positions</td></tr>';
-    cards.innerHTML = '<div class="no-positions">No open positions</div>';
+  if (names.length === 0) {
+    container.innerHTML = '<div class="agent-waiting">Loading agent data...</div>';
     return;
   }
 
-  tbody.innerHTML = positions.map(p => {
-    const qty = p.quantity;
-    const side = qty > 0 ? 'LONG' : 'SHORT';
-    const sideColor = qty > 0 ? 'var(--green)' : 'var(--red)';
-    const pnl = p.unrealizedPnL || 0;
-    const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-    const marketPrice = prices[p.symbol];
-    const mpStr = marketPrice != null ? '$' + fmt(marketPrice) : '--';
-    return `<tr>
-      <td>${p.symbol}</td>
-      <td style="color:${sideColor};font-weight:600">${side}</td>
-      <td>${Math.abs(qty)}</td>
-      <td>$${fmt(p.avgPrice)}</td>
-      <td>${mpStr}</td>
-      <td style="color:${pnlColor};font-weight:600">${pnl >= 0 ? '+' : ''}$${fmt(pnl)}</td>
-      <td>${viewOnly ? '' : `<button class="btn btn-close btn-sm" onclick="closePosition('${p.symbol}')">CLOSE</button>`}</td>
-    </tr>`;
-  }).join('');
+  names.forEach(name => {
+    const agent = agents[name];
+    const panelId = 'agent-dash-' + name.replace(/[^a-zA-Z0-9-]/g, '_');
+    let panel = document.getElementById(panelId);
 
-  cards.innerHTML = positions.map(p => {
-    const qty = p.quantity;
-    const side = qty > 0 ? 'LONG' : 'SHORT';
-    const sideColor = qty > 0 ? 'var(--green)' : 'var(--red)';
-    const pnl = p.unrealizedPnL || 0;
-    const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-    const marketPrice = prices[p.symbol];
-    const mpStr = marketPrice != null ? '$' + fmt(marketPrice) : '--';
-    const closeBtn = viewOnly ? '' : `<div class="pos-card-actions"><button class="btn btn-close btn-sm" onclick="closePosition('${p.symbol}')">CLOSE</button></div>`;
-    return `<div class="pos-card">
-      <div class="pos-card-header">
-        <span class="pos-card-symbol">${p.symbol}</span>
-        <span style="color:${sideColor};font-weight:600">${side} ${Math.abs(qty)}</span>
-      </div>
-      <div class="pos-card-grid">
-        <span class="label">Avg Price</span><span>$${fmt(p.avgPrice)}</span>
-        <span class="label">Mkt Price</span><span>${mpStr}</span>
-        <span class="label">P&L</span><span style="color:${pnlColor};font-weight:600">${pnl >= 0 ? '+' : ''}$${fmt(pnl)}</span>
-      </div>
-      ${closeBtn}
-    </div>`;
-  }).join('');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = panelId;
+      panel.className = 'agent-dashboard';
+      container.appendChild(panel);
+    }
+
+    renderAgentPanel(panel, name, agent);
+  });
+
+  // Remove stale panels + placeholder
+  Array.from(container.children).forEach(el => {
+    if (!el.id || !el.id.startsWith('agent-dash-')) {
+      el.remove();
+    } else {
+      const found = names.some(n => 'agent-dash-' + n.replace(/[^a-zA-Z0-9-]/g, '_') === el.id);
+      if (!found) el.remove();
+    }
+  });
 }
 
-// ── Agent panel ────────────────────────────────────────
-function updateAgent(agent) {
-  if (!agent) {
-    $('agentWaiting').style.display = '';
-    $('agentContent').style.display = 'none';
-    return;
-  }
+function renderAgentPanel(panel, name, agent) {
+  const isBlown = agent.simAccount && agent.simAccount.blown;
+  const practiceBlown = agent.practiceAccount && agent.practiceAccount.blown;
+  const isMirror = mirrorAgent && name === mirrorAgent;
+  panel.className = 'agent-dashboard' + (isBlown ? ' blown' : '');
 
-  // Show header immediately if we have model or strategy (set from env vars at startup)
-  const hasHeader = agent.model || agent.strategy || agent.agent_name;
-  if (hasHeader) {
-    $('agentWaiting').style.display = 'none';
-    $('agentContent').style.display = '';
-  } else {
-    $('agentWaiting').style.display = '';
-    $('agentContent').style.display = 'none';
-    return;
-  }
-
-  // Agent name: show OpenAI logo + model name as the bold title
-  const openaiSvg = '<svg style="width:15px;height:15px;vertical-align:-2px;margin-right:4px;fill:var(--text)" viewBox="0 0 158.7128 157.296" xmlns="http://www.w3.org/2000/svg"><path d="M60.8734,57.2556v-14.9432c0-1.2586.4722-2.2029,1.5728-2.8314l30.0443-17.3023c4.0899-2.3593,8.9662-3.4599,13.9988-3.4599,18.8759,0,30.8307,14.6289,30.8307,30.2006,0,1.1007,0,2.3593-.158,3.6178l-31.1446-18.2467c-1.8872-1.1006-3.7754-1.1006-5.6629,0l-39.4812,22.9651ZM131.0276,115.4561v-35.7074c0-2.2028-.9446-3.7756-2.8318-4.8763l-39.481-22.9651,12.8982-7.3934c1.1007-.6285,2.0453-.6285,3.1458,0l30.0441,17.3024c8.6523,5.0341,14.4708,15.7296,14.4708,26.1107,0,11.9539-7.0769,22.965-18.2461,27.527v.0021ZM51.593,83.9964l-12.8982-7.5497c-1.1007-.6285-1.5728-1.5728-1.5728-2.8314v-34.6048c0-16.8303,12.8982-29.5722,30.3585-29.5722,6.607,0,12.7403,2.2029,17.9324,6.1349l-30.987,17.9324c-1.8871,1.1007-2.8314,2.6735-2.8314,4.8764v45.6159l-.0014-.0015ZM79.3562,100.0403l-18.4829-10.3811v-22.0209l18.4829-10.3811,18.4812,10.3811v22.0209l-18.4812,10.3811ZM91.2319,147.8591c-6.607,0-12.7403-2.2031-17.9324-6.1344l30.9866-17.9333c1.8872-1.1005,2.8318-2.6728,2.8318-4.8759v-45.616l13.0564,7.5498c1.1005.6285,1.5723,1.5728,1.5723,2.8314v34.6051c0,16.8297-13.0564,29.5723-30.5147,29.5723v.001ZM53.9522,112.7822l-30.0443-17.3024c-8.652-5.0343-14.471-15.7296-14.471-26.1107,0-12.1119,7.2356-22.9652,18.403-27.5272v35.8634c0,2.2028.9443,3.7756,2.8314,4.8763l39.3248,22.8068-12.8982,7.3938c-1.1007.6287-2.045.6287-3.1456,0ZM52.2229,138.5791c-17.7745,0-30.8306-13.3713-30.8306-29.8871,0-1.2585.1578-2.5169.3143-3.7754l30.987,17.9323c1.8871,1.1005,3.7757,1.1005,5.6628,0l39.4811-22.807v14.9435c0,1.2585-.4721,2.2021-1.5728,2.8308l-30.0443,17.3025c-4.0898,2.359-8.9662,3.4605-13.9989,3.4605h.0014ZM91.2319,157.296c19.0327,0,34.9188-13.5272,38.5383-31.4594,17.6164-4.562,28.9425-21.0779,28.9425-37.908,0-11.0112-4.719-21.7066-13.2133-29.4143.7867-3.3035,1.2595-6.607,1.2595-9.909,0-22.4929-18.2471-39.3247-39.3251-39.3247-4.2461,0-8.3363.6285-12.4262,2.045-7.0792-6.9213-16.8318-11.3254-27.5271-11.3254-19.0331,0-34.9191,13.5268-38.5384,31.4591C11.3255,36.0212,0,52.5373,0,69.3675c0,11.0112,4.7184,21.7065,13.2125,29.4142-.7865,3.3035-1.2586,6.6067-1.2586,9.9092,0,22.4923,18.2466,39.3241,39.3248,39.3241,4.2462,0,8.3362-.6277,12.426-2.0441,7.0776,6.921,16.8302,11.3251,27.5271,11.3251Z"/></svg>';
+  // Model title
+  let titleHtml = escapeHtml(name);
   if (agent.model) {
-    $('agentName').innerHTML = openaiSvg + agent.model;
-  } else if (agent.agent_name) {
-    $('agentName').textContent = agent.agent_name;
+    titleHtml = getLogoSvg(agent.logo) + escapeHtml(agent.model.replace(':free', ''));
   }
 
-  // Model meta (agent name) & strategy
-  $('agentModel').textContent = agent.agent_name ? 'Agent: ' + agent.agent_name : '';
-  $('agentStrategy').textContent = agent.strategy ? 'Strategy: ' + agent.strategy : '';
-
-  // Sentiment badge
-  const badge = $('sentimentBadge');
+  // Sentiment
   const s = (agent.sentiment || 'neutral').toLowerCase();
-  badge.textContent = s.toUpperCase();
-  badge.className = 'badge badge-' + s;
+  const badgeClass = 'badge badge-' + s;
 
   // Last active
+  let lastActive = 'Waiting...';
   if (agent.last_active) {
-    const d = new Date(agent.last_active);
-    $('agentLastActive').textContent = 'Last active: ' + d.toLocaleTimeString();
-  } else {
-    $('agentLastActive').textContent = 'Waiting for first activity...';
+    lastActive = new Date(agent.last_active).toLocaleTimeString();
   }
 
-  // Reasoning — split ground-truth prefix from LLM text
+  // Stats from webAccount
+  const wa = agent.webAccount || {};
+  const balance = agent.balance || 0;
+  const equity = agent.equity || 0;
+  const dayPnl = wa.realizedDayPnl || 0;
+  const totalPnl = wa.profitAndLoss || 0;
+  const wr = wa.winRate || 0;
+  const totalTrades = wa.totalTrades || 0;
+  const hwm = wa.highestBalance || balance;
+
+  // Positions
+  const positions = agent.positions || [];
+  const totalUnrealized = positions.reduce((sum, p) => sum + (p.unrealizedPnL || 0), 0);
+
+  // Banners
+  let bannersHtml = '';
+  if (isBlown) {
+    bannersHtml += '<div class="blown-banner">Account blown - hit the trailing loss limit' +
+      (viewOnly ? '' : ' <button class="btn btn-reset" onclick="resetAgent(\'' + escapeHtml(name) + '\')">RESET</button>') +
+      '</div>';
+  }
+  if (practiceBlown) {
+    bannersHtml += '<div class="practice-blown-banner">TopstepX practice account is blown - reset on TopstepX platform</div>';
+  }
+
+  // Positions HTML
+  let posHtml = '';
+  if (positions.length === 0) {
+    posHtml = '<div class="no-positions-msg">No open positions</div>';
+  } else {
+    posHtml = positions.map(p => {
+      const qty = p.quantity;
+      const side = qty > 0 ? 'LONG' : 'SHORT';
+      const sideColor = qty > 0 ? 'var(--green)' : 'var(--red)';
+      const pnl = p.unrealizedPnL || 0;
+      const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      const mp = currentPrices[p.symbol];
+      const mpStr = mp != null ? '$' + fmt(mp) : '--';
+      const closeBtn = viewOnly ? '' : '<button class="btn btn-close btn-sm" onclick="closePos(\'' + escapeHtml(name) + '\',\'' + escapeHtml(p.symbol) + '\')">CLOSE</button>';
+      return '<div class="pos-row">' +
+        '<span class="symbol">' + escapeHtml(p.symbol) + '</span>' +
+        '<span class="side" style="color:' + sideColor + '">' + side + ' ' + Math.abs(qty) + '</span>' +
+        '<span class="detail">Avg $' + fmt(p.avgPrice) + '</span>' +
+        '<span class="detail">Mkt ' + mpStr + '</span>' +
+        '<span class="pnl" style="color:' + pnlColor + '">' + (pnl >= 0 ? '+' : '') + '$' + fmt(pnl) + '</span>' +
+        closeBtn +
+        '</div>';
+    }).join('');
+  }
+
+  // Reasoning
   const raw = agent.latest_reasoning || 'No reasoning yet';
   const prefixMatch = raw.match(/^\[(.+?)\]\s*(.*)/s);
+  let reasoningHtml;
   if (prefixMatch) {
-    const badge = document.createElement('div');
-    badge.style.cssText = 'font-weight:bold;margin-bottom:6px;color:var(--blue);';
-    badge.textContent = prefixMatch[1];
-    const text = document.createElement('div');
-    text.textContent = prefixMatch[2];
-    $('agentReasoning').innerHTML = '';
-    $('agentReasoning').appendChild(badge);
-    $('agentReasoning').appendChild(text);
+    reasoningHtml = '<div style="font-weight:bold;margin-bottom:4px;color:var(--blue)">' +
+      escapeHtml(prefixMatch[1]) + '</div><div>' + escapeHtml(prefixMatch[2]) + '</div>';
   } else {
-    $('agentReasoning').textContent = raw;
+    reasoningHtml = escapeHtml(raw);
   }
 
   // Activity feed
-  const feed = $('activityFeed');
   const activity = agent.activity || [];
+  let feedHtml;
   if (activity.length === 0) {
-    feed.innerHTML = '<div class="agent-waiting">No activity yet</div>';
+    feedHtml = '<div class="agent-waiting">No activity yet</div>';
   } else {
-    feed.innerHTML = activity.slice().reverse().map(e => {
+    feedHtml = activity.slice().reverse().map(e => {
       const kindClass = e.kind === 'TOOL CALL' ? 'tool-call' : e.kind === 'RESPONSE' ? 'response' : 'tool-result';
-      return `<div class="activity-entry">
-        <span class="activity-time">${e.time}</span>
-        <span class="activity-kind ${kindClass}">${e.kind}</span>
-        <span class="activity-details">${escapeHtml(e.details)}</span>
-      </div>`;
+      return '<div class="activity-entry">' +
+        '<span class="activity-time">' + e.time + '</span>' +
+        '<span class="activity-kind ' + kindClass + '">' + e.kind + '</span>' +
+        '<span class="activity-details">' + escapeHtml(e.details) + '</span>' +
+        '</div>';
     }).join('');
   }
+
+  // Check if details section is currently collapsed
+  const detailsId = panel.id + '-details';
+  const existing = document.getElementById(detailsId);
+  const collapsed = existing ? existing.style.display === 'none' : false;
+
+  panel.innerHTML =
+    // Header
+    '<div class="agent-dash-header">' +
+      '<span class="agent-dash-name">' + titleHtml + '</span>' +
+      '<span class="' + badgeClass + '">' + s.toUpperCase() + '</span>' +
+      (isMirror ? '<span class="badge badge-mirror"><span>PRAC</span></span>' : '') +
+      '<span class="agent-dash-meta">Agent: ' + escapeHtml(name) + '</span>' +
+      (agent.strategy ? '<span class="agent-dash-meta">Strategy: ' + escapeHtml(agent.strategy) + '</span>' : '') +
+      '<span class="agent-dash-meta" style="margin-left:auto">' + lastActive + '</span>' +
+    '</div>' +
+
+    // Banners
+    bannersHtml +
+
+    // Stat cards
+    '<div class="stat-cards">' +
+      '<div class="stat-card">' +
+        '<div class="label">Equity</div>' +
+        '<div class="value">$' + fmt(equity) + '</div>' +
+        '<div class="sub">Bal $' + fmt(balance) + ' | HWM $' + fmt(hwm) + '</div>' +
+      '</div>' +
+      '<div class="stat-card">' +
+        '<div class="label">Unrealized P&L</div>' +
+        '<div class="value ' + (totalUnrealized >= 0 ? 'positive' : 'negative') + '">' +
+          (totalUnrealized >= 0 ? '+' : '') + '$' + fmt(totalUnrealized) +
+        '</div>' +
+        '<div class="sub">' + positions.length + ' position(s)</div>' +
+      '</div>' +
+      '<div class="stat-card">' +
+        '<div class="label">Day P&L</div>' +
+        '<div class="value ' + (dayPnl >= 0 ? 'positive' : 'negative') + '">' +
+          (dayPnl >= 0 ? '+' : '') + '$' + fmt(dayPnl) +
+        '</div>' +
+        '<div class="sub">Total: <span style="color:' + (totalPnl >= 0 ? 'var(--green)' : 'var(--red)') + '">' +
+          (totalPnl >= 0 ? '+' : '') + '$' + fmt(totalPnl) + '</span></div>' +
+      '</div>' +
+      '<div class="stat-card">' +
+        '<div class="label">Win Rate</div>' +
+        '<div class="value">' + (wr * 100).toFixed(1) + '%</div>' +
+        '<div class="sub">' + totalTrades + ' trades</div>' +
+      '</div>' +
+    '</div>' +
+
+    // Positions
+    '<div class="agent-positions">' +
+      '<div class="section-label">Open Positions</div>' +
+      posHtml +
+    '</div>' +
+
+    // Collapsible details: reasoning + activity
+    '<button class="toggle-btn" onclick="toggleDetails(\'' + detailsId + '\', this)">' +
+      (collapsed ? 'SHOW' : 'HIDE') + ' DETAILS</button>' +
+    '<div id="' + detailsId + '" style="' + (collapsed ? 'display:none' : '') + '">' +
+      '<div class="section-label">Latest Reasoning</div>' +
+      '<div class="reasoning-block">' + reasoningHtml + '</div>' +
+      '<div class="section-label">Recent Activity</div>' +
+      '<div class="activity-feed">' + feedHtml + '</div>' +
+    '</div>';
 }
 
-function escapeHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+function toggleDetails(id, btn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (el.style.display === 'none') {
+    el.style.display = '';
+    btn.textContent = 'HIDE DETAILS';
+  } else {
+    el.style.display = 'none';
+    btn.textContent = 'SHOW DETAILS';
+  }
 }
 
 // ── Trade actions ──────────────────────────────────────
 async function placeTrade(action) {
+  const agentSelect = $('agentSelect');
+  const agent = agentSelect ? agentSelect.value : '';
   const contract = $('contractSelect').value;
   const quantity = parseInt($('qtyInput').value);
   if (!quantity || quantity <= 0) { log('Invalid quantity', 'error'); return; }
 
-  log(`Placing ${action.toUpperCase()} ${quantity}x ${contract}...`);
-
+  log(`[${agent}] Placing ${action.toUpperCase()} ${quantity}x ${contract}...`);
   try {
-    const resp = await fetch(`/api/${action}?contract=${encodeURIComponent(contract)}&quantity=${quantity}`, {method: 'POST'});
+    const resp = await fetch(`/api/${action}?contract=${encodeURIComponent(contract)}&quantity=${quantity}&agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const data = await resp.json();
     if (data.success) {
-      log(`${action.toUpperCase()} order placed successfully (ID: ${data.orderId || 'N/A'})`, 'success');
+      log(`[${agent}] ${action.toUpperCase()} placed successfully`, 'success');
     } else {
-      log(`${action.toUpperCase()} failed: ${data.error || 'Unknown error'}`, 'error');
+      log(`[${agent}] ${action.toUpperCase()} failed: ${data.error || 'Unknown error'}`, 'error');
     }
   } catch(err) {
-    log(`${action.toUpperCase()} error: ${err.message}`, 'error');
+    log(`[${agent}] ${action.toUpperCase()} error: ${err.message}`, 'error');
   }
 }
 
-async function closePosition(contract) {
-  log(`Closing position: ${contract}...`);
+async function closePos(agent, contract) {
+  log(`[${agent}] Closing ${contract}...`);
   try {
-    const resp = await fetch(`/api/close?contract=${encodeURIComponent(contract)}`, {method: 'POST'});
+    const resp = await fetch(`/api/close?contract=${encodeURIComponent(contract)}&agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const data = await resp.json();
     if (data.success) {
-      log(`Position ${contract} closed successfully`, 'success');
+      log(`[${agent}] ${contract} closed`, 'success');
     } else {
-      log(`Close failed: ${data.error || 'Unknown error'}`, 'error');
+      log(`[${agent}] Close failed: ${data.error || 'Unknown error'}`, 'error');
     }
   } catch(err) {
-    log(`Close error: ${err.message}`, 'error');
+    log(`[${agent}] Close error: ${err.message}`, 'error');
   }
 }
 
-// Start: fetch config then connect
+async function resetAgent(agent) {
+  if (!confirm('Reset ' + agent + ' sim account? Balance restored to starting value, all positions closed. Trade history preserved.')) return;
+  log(`Resetting ${agent}...`);
+  try {
+    const resp = await fetch(`/api/reset-account?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
+    const data = await resp.json();
+    if (data.success) {
+      log(`${agent} reset to $${fmt(data.balance)}`, 'success');
+    } else {
+      log(`Reset failed: ${data.error || 'Unknown error'}`, 'error');
+    }
+  } catch(err) {
+    log(`Reset error: ${err.message}`, 'error');
+  }
+}
+
+// Start
 fetch('/api/config').then(r => r.json()).then(cfg => {
   viewOnly = cfg.viewOnly || false;
   if (viewOnly) {
     $('viewOnlyBadge').style.display = 'inline';
     $('tradeSection').style.display = 'none';
   }
-  loadBalanceHistory();
   connectWS();
 }).catch(() => connectWS());
 </script>

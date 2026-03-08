@@ -48,13 +48,32 @@ services:
       timeout: 10s
       retries: 5
 
-  # 3. Market Data Connector (TopstepX → Kafka) - THIS TRIGGERS THE AGENT!
+  # 2b. Topic Initialization (one-shot)
+  init-topics:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: futures-init-topics
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    volumes:
+      - ./create-topics.sh:/create-topics.sh
+      - ./agents.yml:/agents.yml:ro
+    command: ["bash", "/create-topics.sh"]
+    networks:
+      - trading-network
+    restart: "no"
+
+  # 3. Market Data Connector (TopstepX -> Kafka)
   market-connector:
     build: .
     container_name: futures-market-connector
     depends_on:
       kafka:
         condition: service_healthy
+      init-topics:
+        condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
@@ -64,9 +83,8 @@ services:
     command: >
       python unified_market_connector.py
       --provider topstepx
-      --symbols CON.F.US.MES.H26 CON.F.US.MNQ.H26
+      --symbols CON.F.US.MES.H26
       --bootstrap-servers kafka:9092
-      --router-name futures-trader
       --candles-only
     networks:
       - trading-network
@@ -74,25 +92,60 @@ services:
     volumes:
       - ./logs:/app/logs
 
-  # 4. TopstepX Trading Tools Service
+  # 4. MySQL (Simulated Trading Accounts)
+  mysql:
+    image: mysql:8.0
+    container_name: futures-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_pass}
+      MYSQL_DATABASE: trading_arena
+      MYSQL_USER: trading
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-trading_pass}
+    ports:
+      - "3306:3306"
+    networks:
+      - trading-network
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # 5. TopstepX Trading Tools Service
   trading-tools:
     build: .
     container_name: futures-trading-tools
     depends_on:
       kafka:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
+      init-topics:
+        condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
       - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
       - TOPSTEPX_ENVIRONMENT=${TOPSTEPX_ENVIRONMENT:-demo}
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=trading
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-trading_pass}
+      - MYSQL_DATABASE=trading_arena
       - SERVICE_NAME=topstepx_trading_tools
       - DASHBOARD_PORT=8080
       - DASHBOARD_VIEW_ONLY=${DASHBOARD_VIEW_ONLY:-true}
       - AGENT_NAME=futures-trader
       - AGENT_MODEL=gpt-5-nano
       - AGENT_STRATEGY=futures
-      - TOPSTEPX_STREAM_SYMBOLS=CON.F.US.MES.H26,CON.F.US.MNQ.H26
+      - TOPSTEPX_STREAM_SYMBOLS=CON.F.US.MES.H26
+      - TOPSTEP_REFRESH_TOKEN=${TOPSTEP_REFRESH_TOKEN:-}
+      - MIRROR_AGENT=${MIRROR_AGENT:-}
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers kafka:9092
@@ -104,9 +157,7 @@ services:
     volumes:
       - ./logs:/app/logs
 
-  # 5. Tools & Dashboard (Trading Tools + Terminal UI)
-  # NOTE: This service is for CRYPTO trading (Coinbase), not futures
-  # For futures trading, disable this service or use --scale dashboard=0
+  # 5b. Tools & Dashboard (Crypto - optional)
   dashboard:
     build: .
     container_name: futures-dashboard
@@ -129,61 +180,36 @@ services:
       - ./logs:/app/logs
     profiles:
       - crypto
-    # Note: Dashboard is terminal-based (Rich), not web-based
-    # To view: docker-compose logs -f dashboard
 
-  # 6. ChatNode (LLM Inference - GPT-5 Nano)
-  chatnode:
+  # 6. Agent Launcher (reads agents.yml, spawns ChatNodes + Agent Routers)
+  agents:
     build: .
-    container_name: futures-chatnode
+    container_name: futures-agents
     depends_on:
       kafka:
         condition: service_healthy
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - SERVICE_NAME=deploy_chat_node
-    command: >
-      python deploy_chat_node.py
-      --name gpt5-nano
-      --model-id gpt-5-nano
-      --bootstrap-servers kafka:9092
-      --reasoning-effort high
-    networks:
-      - trading-network
-    restart: unless-stopped
-    volumes:
-      - ./logs:/app/logs
-
-  # 7. Agent Router (Futures Trader)
-  agent:
-    build: .
-    container_name: futures-agent
-    depends_on:
-      kafka:
-        condition: service_healthy
-      chatnode:
-        condition: service_started
+      init-topics:
+        condition: service_completed_successfully
       market-connector:
         condition: service_started
       trading-tools:
         condition: service_started
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - SERVICE_NAME=deploy_router_node
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - SERVICE_NAME=agent_launcher
     command: >
-      python deploy_router_node.py
-      --name futures-trader
-      --chat-node-name gpt5-nano
-      --strategy futures
+      python agent_launcher.py
       --bootstrap-servers kafka:9092
     networks:
       - trading-network
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
+      - ./agents.yml:/app/agents.yml:ro
 
-  # 8. Response Viewer (Optional - Agent Activity Monitor)
+  # 7. Response Viewer (Optional - Agent Activity Monitor)
   response-viewer:
     build: .
     container_name: futures-response-viewer
@@ -210,4 +236,6 @@ networks:
 
 volumes:
   logs:
+    driver: local
+  mysql-data:
     driver: local
