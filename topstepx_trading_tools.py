@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sys
+import time as _time
 from collections import deque
 from datetime import datetime
 from typing import Optional
@@ -36,7 +37,6 @@ from calfkit.nodes.base_tool_node import agent_tool
 from calfkit.runners.service import NodesService
 from sim_account_manager import SimAccountManager
 from topstepx_account import TopstepXAccountClient, TopstepXPriceStreamer
-from unified_market_connector import FUTURES_PRICE_TOPIC
 
 load_dotenv()
 
@@ -183,6 +183,7 @@ class TopstepXTradingClient:
 _sim_manager: Optional[SimAccountManager] = None
 _trading_client: Optional[TopstepXTradingClient] = None
 _practice_account_id: Optional[int] = None
+_price_streamer: Optional[TopstepXPriceStreamer] = None
 
 
 def _init_client():
@@ -323,7 +324,7 @@ def _truncate(s: str, max_len: int) -> str:
 
 
 _POSITION_WORDS = re.compile(
-    r'\b(long|short|flat|holding|hold|held|positions?|contracts?|MES|unrealized|P&L|pnl|no open|no entries)\b',
+    r'\b(long|short|flat|holding|hold|held|positions?|contracts?|unrealized|P&L|pnl|no open|no entries)\b',
     re.IGNORECASE,
 )
 
@@ -434,6 +435,72 @@ def get_all_agents_state() -> dict:
     return {name: dict(state) for name, state in _all_agent_states.items()}
 
 
+# ── Blown account tracking ───────────────────────────────────────
+_blown_agents: dict[str, float] = {}  # agent_name -> timestamp when marked blown
+_BLOWN_CACHE_TTL = 60.0  # re-check DB every 60s so resets are picked up
+
+async def _check_blown(agent_name: str) -> bool:
+    """Check if agent's account is blown. Caches with TTL to avoid repeated DB hits."""
+    cached_at = _blown_agents.get(agent_name)
+    if cached_at is not None and (_time.monotonic() - cached_at) < _BLOWN_CACHE_TTL:
+        return True
+    if _sim_manager is None:
+        return False
+    portfolio = await _sim_manager.get_portfolio(agent_name)
+    if portfolio.get("blown"):
+        _blown_agents[agent_name] = _time.monotonic()
+        return True
+    # Account is not blown (possibly reset) — clear stale cache entry
+    _blown_agents.pop(agent_name, None)
+    return False
+
+_reset_agents: set[str] = set()  # agents that were just reset — notify on next tool call
+
+def clear_blown_cache(agent_name: str) -> None:
+    """Clear blown cache for an agent (called on account reset)."""
+    _blown_agents.pop(agent_name, None)
+    _reset_agents.add(agent_name)
+
+def _consume_reset_notice(agent_name: str) -> str:
+    """If the agent was recently reset, return a one-time notice and clear the flag."""
+    if agent_name in _reset_agents:
+        _reset_agents.discard(agent_name)
+        return (
+            "\n\n🔄 ACCOUNT RESET NOTICE: Your account has been reset to $150,000. "
+            "Trading is FULLY ENABLED. You are NOT blown. "
+            "Learn from prior mistakes — manage risk carefully. "
+            "Resume trading normally."
+        )
+    return ""
+
+_BLOWN_MSG = "⛔ ACCOUNT BLOWN — trading is permanently disabled. Do NOT call any more tools."
+
+
+def _ensure_price_streaming(contract_id: str) -> None:
+    """Subscribe to price streaming for a contract (for live PnL)."""
+    if _price_streamer is not None:
+        _price_streamer.subscribe(contract_id)
+
+
+async def _ensure_live_price(contract_id: str) -> bool:
+    """Ensure a live price exists for a contract before trading.
+
+    Subscribes to the RTC stream and, if no price is cached yet,
+    does a one-shot REST fetch so the trade can fill immediately.
+    Returns True if a price is available.
+    """
+    _ensure_price_streaming(contract_id)
+    if TopstepXAccountClient.get_market_price(contract_id) is not None:
+        return True
+    # One-shot REST fetch to seed the price for first trade
+    if _price_streamer and _price_streamer._account_client:
+        price = await _price_streamer._account_client._fetch_current_price(contract_id)
+        if price is not None:
+            TopstepXAccountClient.update_market_price(contract_id, price)
+            return True
+    return False
+
+
 # ── Agent Tools ──────────────────────────────────────────────────
 
 
@@ -446,7 +513,7 @@ async def topstepx_buy(
     """Buy futures contracts.
 
     Args:
-        contract: Contract ID (e.g., "CON.F.US.MES.H26" for Micro E-mini S&P)
+        contract: Contract ID from topstepx_available_contracts()
         quantity: Number of contracts to buy (must be positive integer)
 
     Returns:
@@ -455,16 +522,24 @@ async def topstepx_buy(
     if _sim_manager is None:
         return "❌ Simulated trading not initialized"
 
+    from unified_market_connector import _is_market_open
+    if not _is_market_open():
+        return "❌ Market is CLOSED. No trading allowed until market reopens. Call topstepx_portfolio to check your account."
+
     if quantity <= 0:
         return "❌ Quantity must be positive"
 
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
     logger.info(f"🔵 SIM BUY ORDER: {agent_name} {quantity}x {contract}")
+    await _ensure_live_price(contract)
     result = await _sim_manager.execute_buy(agent_name, contract, quantity)
 
     if result.get("success"):
         price = result["fill_price"]
-        logger.info(f"✅ SIM BUY FILLED: {quantity}x {contract} @ ${price:,.2f}")
+        fee = result.get("fee", 0)
+        logger.info(f"✅ SIM BUY FILLED: {quantity}x {contract} @ ${price:,.2f} | Fee: ${fee:,.2f}")
         # Mirror to real practice account if this is the designated agent
         mirror_agent = os.getenv("MIRROR_AGENT", "")
         if mirror_agent and agent_name == mirror_agent:
@@ -474,6 +549,7 @@ async def topstepx_buy(
             f"  Contract: {contract}\n"
             f"  Quantity: {quantity}\n"
             f"  Fill Price: ${price:,.2f}\n"
+            f"  Commission: ${fee:,.2f}\n"
             f"  Account: {agent_name}"
         )
     else:
@@ -491,7 +567,7 @@ async def topstepx_sell(
     """Sell futures contracts.
 
     Args:
-        contract: Contract ID (e.g., "CON.F.US.MES.H26" for Micro E-mini S&P)
+        contract: Contract ID from topstepx_available_contracts()
         quantity: Number of contracts to sell (must be positive integer)
 
     Returns:
@@ -500,16 +576,24 @@ async def topstepx_sell(
     if _sim_manager is None:
         return "❌ Simulated trading not initialized"
 
+    from unified_market_connector import _is_market_open
+    if not _is_market_open():
+        return "❌ Market is CLOSED. No trading allowed until market reopens. Call topstepx_portfolio to check your account."
+
     if quantity <= 0:
         return "❌ Quantity must be positive"
 
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
     logger.info(f"🔴 SIM SELL ORDER: {agent_name} {quantity}x {contract}")
+    await _ensure_live_price(contract)
     result = await _sim_manager.execute_sell(agent_name, contract, quantity)
 
     if result.get("success"):
         price = result["fill_price"]
-        logger.info(f"✅ SIM SELL FILLED: {quantity}x {contract} @ ${price:,.2f}")
+        fee = result.get("fee", 0)
+        logger.info(f"✅ SIM SELL FILLED: {quantity}x {contract} @ ${price:,.2f} | Fee: ${fee:,.2f}")
         mirror_agent = os.getenv("MIRROR_AGENT", "")
         if mirror_agent and agent_name == mirror_agent:
             await _mirror_to_practice("SELL", contract, quantity)
@@ -518,6 +602,7 @@ async def topstepx_sell(
             f"  Contract: {contract}\n"
             f"  Quantity: {quantity}\n"
             f"  Fill Price: ${price:,.2f}\n"
+            f"  Commission: ${fee:,.2f}\n"
             f"  Account: {agent_name}"
         )
     else:
@@ -538,7 +623,7 @@ async def topstepx_close(
     If quantity is < position size, partially closes that many contracts.
 
     Args:
-        contract: Contract ID (e.g., "CON.F.US.MES.H26")
+        contract: Contract ID from topstepx_available_contracts()
         quantity: Number of contracts to close. 0 = close all.
 
     Returns:
@@ -548,6 +633,8 @@ async def topstepx_close(
         return "❌ Simulated trading not initialized"
 
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
     logger.info(f"🔶 SIM CLOSE: {agent_name} {contract} qty={quantity}")
     result = await _sim_manager.execute_close(agent_name, contract, quantity)
 
@@ -559,12 +646,14 @@ async def topstepx_close(
         mirror_agent = os.getenv("MIRROR_AGENT", "")
         if mirror_agent and agent_name == mirror_agent:
             await _mirror_to_practice("CLOSE", contract, quantity)
+        fee = result.get("fee", 0)
         lines = [
             f"✓ Position CLOSED",
             f"  Contract: {contract}",
             f"  Quantity closed: {qty_closed}",
             f"  Fill Price: ${price:,.2f}",
             f"  Realized P&L: ${pnl:+,.2f}",
+            f"  Commission: ${fee:,.2f}",
             f"  New Balance: ${result['new_balance']:,.2f}",
         ]
         if result.get("blown"):
@@ -603,6 +692,8 @@ async def report_sentiment(
     import time as _time
 
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
 
     # ── Rescue values from wrong arg names the LLM may use ──
     if not reasoning and kwargs:
@@ -663,6 +754,205 @@ async def report_sentiment(
 
 
 @agent_tool
+async def topstepx_available_contracts(ctx: ToolContext) -> str:
+    """Get list of available futures contracts you can trade.
+
+    Returns:
+        Table of tradeable contracts with specs and commission info
+    """
+    if _sim_manager is None:
+        return "❌ Simulated trading not initialized"
+
+    agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
+
+    contracts = await _sim_manager.get_active_contracts()
+    if not contracts:
+        return "No contracts available. Contract data may not be synced yet."
+
+    lines = [
+        "AVAILABLE CONTRACTS:",
+        f"{'Contract ID':<28} {'Group':>5} {'Type':>6} {'Tick':>6} {'$/Tick':>7} {'RT Fee':>7} {'MicroEq':>7}",
+        "-" * 78,
+    ]
+    for c in contracts:
+        ctype = "MICRO" if c["is_micro"] else "FULL"
+        lines.append(
+            f"{c['contract_id']:<28} {c['contract_group']:>5} {ctype:>6} "
+            f"{c['tick_size']:>6.4g} ${c['tick_value']:>5.2f} ${c['commission_rt']:>5.2f} "
+            f"{c['micro_equivalent']:>7d}"
+        )
+    lines.append(f"\nPosition limit: 1 full-size = 10 micro-equivalents. 150K account = 150 micro-equiv max.")
+    lines.append("Use topstepx_retrieve_bars(contract_id, timeframe, bars) to analyze price history before trading.")
+    return "\n".join(lines)
+
+
+# ── Bars cache for retrieve_bars ──
+_bars_cache: dict[str, tuple[float, str]] = {}  # key -> (timestamp, result)
+_BARS_CACHE_TTL = 45.0  # seconds — shared across all agents
+_bars_rate_limit_until: float = 0.0  # backoff timestamp after 429
+_bars_lock = asyncio.Lock()  # serialize concurrent retrieve_bars calls
+# Rolling window rate limiter: track timestamps of recent API calls
+_bars_call_timestamps: list[float] = []
+_BARS_RATE_LIMIT = 40  # stay under 50/30s with headroom for price polling
+_BARS_RATE_WINDOW = 30.0
+
+
+@agent_tool
+async def topstepx_retrieve_bars(
+    ctx: ToolContext,
+    contract_id: str,
+    timeframe: str = "5min",
+    bars: int = 20,
+) -> str:
+    """Retrieve historical price bars for any available contract.
+
+    Args:
+        contract_id: Contract ID from topstepx_available_contracts()
+        timeframe: Bar timeframe: "1min", "5min", "15min", "1hour", "4hour"
+        bars: Number of bars to retrieve (max 50)
+
+    Returns:
+        OHLCV price data for the requested contract
+    """
+    if _sim_manager is None:
+        return "❌ Simulated trading not initialized"
+
+    agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
+
+    # Validate contract exists
+    info = await _sim_manager._get_contract_info(contract_id)
+    if info is None:
+        # Suggest similar contracts from the cache
+        parts = contract_id.split(".")
+        base = parts[-2] if len(parts) >= 2 else ""
+        suggestions = [cid for cid in _sim_manager._contract_cache if base and base in cid]
+        hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+        return f"❌ Unknown contract: {contract_id}. Call topstepx_available_contracts() to see valid contracts.{hint}"
+
+    # Clamp bars
+    bars = max(1, min(bars, 50))
+
+    # Map timeframe string to seconds
+    tf_map = {
+        "1min": 60, "5min": 300, "15min": 900,
+        "1hour": 3600, "4hour": 14400,
+    }
+    granularity = tf_map.get(timeframe)
+    if granularity is None:
+        return f"❌ Invalid timeframe '{timeframe}'. Use: {', '.join(tf_map.keys())}"
+
+    cache_key = f"{contract_id}:{timeframe}"
+
+    # Serialize concurrent calls so they share cache instead of all hitting API
+    async with _bars_lock:
+        now = _time.time()
+        cached = _bars_cache.get(cache_key)
+        if cached and (now - cached[0]) < _BARS_CACHE_TTL:
+            return cached[1]
+
+        # Global rate limit backoff after 429
+        global _bars_rate_limit_until
+        if now < _bars_rate_limit_until:
+            if cached:
+                return cached[1]
+            wait = int(_bars_rate_limit_until - now)
+            return f"Rate limited — retry in {wait}s. Call topstepx_portfolio to check your positions instead."
+
+        # Rolling window rate limit: stay under 40 calls per 30s
+        cutoff = now - _BARS_RATE_WINDOW
+        _bars_call_timestamps[:] = [t for t in _bars_call_timestamps if t > cutoff]
+        if len(_bars_call_timestamps) >= _BARS_RATE_LIMIT:
+            if cached:
+                return cached[1]
+            return "Rate limit reached — too many bar requests. Call topstepx_portfolio to check your positions instead."
+
+        jwt_token = os.getenv("TOPSTEPX_JWT_TOKEN", "")
+        if not jwt_token:
+            return "❌ No API token available for fetching bars"
+
+        import httpx
+        from datetime import timedelta, timezone as tz
+
+        now_utc = datetime.now(tz.utc)
+        fetch_bars = 50
+        lookback_seconds = granularity * fetch_bars * 2
+        start_time = now_utc - timedelta(seconds=lookback_seconds)
+
+        if granularity < 60:
+            unit, unit_number = 1, granularity
+        elif granularity < 3600:
+            unit, unit_number = 2, granularity // 60
+        else:
+            unit, unit_number = 3, granularity // 3600
+
+        try:
+            api_base = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com")
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                headers={"Authorization": f"Bearer {jwt_token}"},
+            ) as client:
+                _bars_call_timestamps.append(_time.time())
+                resp = await client.post(
+                    f"{api_base}/api/History/retrieveBars",
+                    json={
+                        "contractId": contract_id,
+                        "live": False,
+                        "startTime": start_time.isoformat(),
+                        "endTime": now_utc.isoformat(),
+                        "unit": unit,
+                        "unitNumber": unit_number,
+                        "limit": fetch_bars,
+                        "includePartialBar": True,
+                    },
+                )
+                if resp.status_code == 429:
+                    _bars_rate_limit_until = _time.time() + 30.0
+                    logger.warning("retrieve_bars 429 rate limited — backing off 30s")
+                    if cached:
+                        return cached[1]
+                    return "Rate limited by TopstepX API. Call topstepx_portfolio to check your positions instead."
+                resp.raise_for_status()
+                data = resp.json()
+
+            if not data.get("success"):
+                return f"❌ API error: {data.get('errorMessage', 'Unknown')}"
+
+            all_bars = data.get("bars", [])
+            if not all_bars:
+                return f"No bars returned for {contract_id} ({timeframe}). Market may be closed."
+
+            latest_close = float(all_bars[-1]["c"])
+            if TopstepXAccountClient.get_contract_specs(contract_id) is None:
+                TopstepXAccountClient.update_contract_specs(
+                    contract_id, info["tick_size"], info["tick_value"]
+                )
+
+            display_bars = all_bars[-bars:]
+            desc = info.get("description") or info.get("name") or contract_id
+            lines = [
+                f"[{desc}] {timeframe} bars (latest {len(display_bars)}):",
+                "Time,Open,High,Low,Close,Volume",
+            ]
+            for bar in display_bars:
+                lines.append(
+                    f"{bar['t']},{bar['o']},{bar['h']},{bar['l']},{bar['c']},{bar['v']}"
+                )
+            lines.append(f"\nCurrent price: ${latest_close:,.2f}")
+
+            result = "\n".join(lines)
+            _bars_cache[cache_key] = (_time.time(), result)
+            return result
+
+        except Exception as e:
+            logger.error(f"retrieve_bars error for {contract_id}: {e}")
+            return f"❌ Failed to fetch bars: {e}"
+
+
+@agent_tool
 async def topstepx_portfolio(ctx: ToolContext) -> str:
     """Get portfolio status with real-time P&L.
 
@@ -673,13 +963,18 @@ async def topstepx_portfolio(ctx: ToolContext) -> str:
         return "❌ Simulated trading not initialized"
 
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
+    reset_notice = _consume_reset_notice(agent_name)
+    if await _check_blown(agent_name):
+        return _BLOWN_MSG
 
     # Per-agent cache: when flat, return cached result for 30s to avoid spamming DB
+    # Skip cache if there's a reset notice to deliver
     import time as _time
     now = _time.time()
     cache = _portfolio_caches.setdefault(agent_name, {"result": None, "time": 0.0, "has_positions": False})
     if (
-        cache["result"] is not None
+        not reset_notice
+        and cache["result"] is not None
         and not cache["has_positions"]
         and (now - cache["time"]) < 30.0
     ):
@@ -705,6 +1000,7 @@ async def topstepx_portfolio(ctx: ToolContext) -> str:
             f"Balance: ${balance:,.2f} | Equity: ${balance:,.2f}\n"
             f"---\nNOW call report_sentiment(reasoning=<your analysis>, sentiment=<bullish|bearish|neutral>)"
         )
+        result += reset_notice
         cache.update(result=result, time=now, has_positions=False)
         return result
 
@@ -741,7 +1037,7 @@ async def topstepx_portfolio(ctx: ToolContext) -> str:
 
     state = _get_agent_state(agent_name)
     state["last_active"] = datetime.now().isoformat()
-    result = "\n".join(lines)
+    result = "\n".join(lines) + reset_notice
     cache.update(result=result, time=now, has_positions=True,
                  prefix=f"[{', '.join(hold_parts)}] ")
     return result
@@ -775,7 +1071,7 @@ async def main():
 
     # Pre-create accounts for all configured agents
     agent_name = os.getenv("AGENT_NAME", "futures-trader")
-    all_agents = {agent_name}
+    all_agents = set()
     # Read from agents.yml if available
     agents_yml = os.path.join(os.path.dirname(__file__), "agents.yml")
     agents_cfg = None
@@ -791,6 +1087,9 @@ async def main():
     # Also support AGENT_NAMES env var as override
     agent_names_csv = os.getenv("AGENT_NAMES", "")
     all_agents |= {n.strip() for n in agent_names_csv.split(",") if n.strip()}
+    # Only use AGENT_NAME fallback if no agents discovered from config
+    if not all_agents:
+        all_agents.add(agent_name)
     for name in sorted(all_agents):
         await _sim_manager.get_or_create_account(name)
         logger.info(f"Sim account ready for agent: {name}")
@@ -808,6 +1107,50 @@ async def main():
 
     # Start background MLL monitor + daily reset scheduler
     bg_tasks = await _sim_manager.start_background_tasks()
+
+    # Start market-close liquidation monitor
+    async def _market_close_monitor():
+        """Auto-liquidate all positions when market closes."""
+        from unified_market_connector import _is_market_open
+        was_open = _is_market_open()
+        # On startup, if market is already closed, liquidate any stale positions
+        if not was_open:
+            try:
+                results = await _sim_manager.liquidate_all_positions()
+                if results:
+                    logger.info(f"Startup liquidation (market closed): {len(results)} position(s) closed")
+            except Exception as e:
+                logger.error(f"Startup liquidation error: {e}")
+        while True:
+            try:
+                is_open = _is_market_open()
+                # Detect market close transition (open -> closed)
+                if was_open and not is_open:
+                    logger.info("MARKET CLOSED — liquidating all open positions")
+                    results = await _sim_manager.liquidate_all_positions()
+                    for r in results:
+                        agent = r.get("agent_name", "?")
+                        if r.get("success"):
+                            # Record liquidation in agent activity feed
+                            activity = _get_agent_activity(agent)
+                            activity.append({
+                                "ts": datetime.now().isoformat(),
+                                "type": "LIQUIDATION",
+                                "msg": f"Market close: {r['symbol']} closed @ ${r['fill_price']:,.2f} (P&L: ${r['realized_pnl']:+,.2f})",
+                            })
+                    if results:
+                        logger.info(f"Market-close liquidation complete: {len(results)} position(s) closed")
+                    else:
+                        logger.info("Market closed — no open positions to liquidate")
+                was_open = is_open
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.error(f"Market-close monitor error: {e}")
+            await asyncio.sleep(30)
+
+    asyncio.create_task(_market_close_monitor())
+    logger.info("Market-close liquidation monitor started")
 
     # ── Authenticate with TopstepX (for RTC prices + real trade mirroring) ──
     if not os.getenv("TOPSTEPX_JWT_TOKEN"):
@@ -828,6 +1171,15 @@ async def main():
                 logger.info("Authenticated successfully — JWT token obtained")
         else:
             logger.info("TopstepX credentials not set — RTC prices + trade mirroring disabled")
+
+    # Sync contracts from TopstepX API into database
+    jwt_for_sync = os.getenv("TOPSTEPX_JWT_TOKEN", "")
+    if jwt_for_sync:
+        api_url = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com")
+        synced = await _sim_manager.sync_contracts(jwt_for_sync, api_url)
+        logger.info(f"Contract sync: {synced} contracts loaded into database")
+    else:
+        logger.warning("No JWT token — skipping contract sync (using fallback specs)")
 
     # Initialize TopstepX client for RTC prices, practice account stats, and trade mirroring
     _init_client()
@@ -858,27 +1210,30 @@ async def main():
             else:
                 logger.info("TOPSTEP_REFRESH_TOKEN not set — dashboard balance history disabled")
 
-    # Start real-time price streaming via SignalR gateway
-    price_streamer = None
+    # Start real-time price streaming (subscribes dynamically when agents enter positions)
+    global _price_streamer
     jwt_token = os.getenv("TOPSTEPX_JWT_TOKEN", "")
-    stream_symbols_str = os.getenv("TOPSTEPX_STREAM_SYMBOLS", "").strip()
-    if stream_symbols_str:
-        stream_symbols = [s.strip() for s in stream_symbols_str.split(",") if s.strip()]
-    elif _trading_client and _practice_account_id:
-        positions = await _trading_client._account_client.get_positions(_practice_account_id)
-        stream_symbols = list({pos.symbol for pos in positions})
-    else:
-        stream_symbols = []
-
-    if jwt_token and stream_symbols:
+    if jwt_token:
         ws_base = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com").replace("api.", "rtc.")
         price_streamer = TopstepXPriceStreamer(
-            jwt_token, stream_symbols, ws_base=ws_base,
+            jwt_token, [], ws_base=ws_base,
             account_client=_trading_client._account_client if _trading_client else None,
             account_id=_practice_account_id,
         )
         await price_streamer.start()
-        logger.info(f"RTC price streamer started for: {stream_symbols}")
+        _price_streamer = price_streamer
+        logger.info("RTC price streamer started (dynamic subscription on position entry)")
+
+        # Subscribe to contracts with existing open positions
+        if _sim_manager:
+            try:
+                open_symbols = await _sim_manager.get_all_open_position_symbols()
+                for sym in open_symbols:
+                    price_streamer.subscribe(sym)
+                if open_symbols:
+                    logger.info(f"Subscribed to existing position contracts: {open_symbols}")
+            except Exception as e:
+                logger.warning(f"Failed to subscribe to existing positions: {e}")
 
     print("=" * 60)
     print("TopstepX Trading Arena (Simulated Accounts + RTC Prices)")
@@ -889,14 +1244,6 @@ async def main():
     broker = BrokerClient(bootstrap_servers=args.bootstrap_servers)
     service = NodesService(broker)
 
-    # Subscribe to futures price updates from market-connector (backup to RTC)
-    @broker.subscriber(FUTURES_PRICE_TOPIC, group_id="topstepx-trading-tools")
-    async def handle_futures_price(message: dict) -> None:
-        contract_id = message.get("contract_id")
-        price = message.get("price")
-        if contract_id and price is not None:
-            TopstepXAccountClient.update_market_price(contract_id, float(price))
-
     # Subscribe to agent output for dashboard activity panel
     @broker.subscriber("agent_router.output", group_id="dashboard-agent-viewer")
     async def handle_agent_output(envelope: EventEnvelope) -> None:
@@ -904,7 +1251,7 @@ async def main():
 
     # Register tools
     print("\nRegistering trading tools:")
-    tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, report_sentiment]
+    tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, topstepx_available_contracts, topstepx_retrieve_bars, report_sentiment]
     for tool in tools:
         service.register_node(tool)
         print(f"  ✓ {tool.tool_schema.name} - {tool.tool_schema.description}")

@@ -52,7 +52,7 @@ services:
     command: ["bash", "/create-topics.sh"]
     restart: "no"
 
-  # 3. Market Data Connector (TopstepX → Kafka)
+  # 3. Agent Trigger (periodic heartbeat → agent_router.input)
   market-connector:
     build:
       context: .
@@ -66,16 +66,11 @@ services:
         condition: service_completed_successfully
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-      - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME}
-      - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY}
-      - TOPSTEPX_ENVIRONMENT=${TOPSTEPX_ENVIRONMENT:-demo}
-      - SERVICE_NAME=unified_market_connector
+      - SERVICE_NAME=agent_trigger
     command: >
       python unified_market_connector.py
-      --provider topstepx
-      --symbols CON.F.US.MES.H26
       --bootstrap-servers localhost:9092
-      --candles-only
+      --trigger-interval 60
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
@@ -127,11 +122,9 @@ services:
       - MYSQL_DATABASE=trading_arena
       - SERVICE_NAME=topstepx_trading_tools
       - DASHBOARD_PORT=8080
-      - DASHBOARD_VIEW_ONLY=${DASHBOARD_VIEW_ONLY:-true}
       - AGENT_NAME=futures-trader
       - AGENT_MODEL=gpt-5-nano
       - AGENT_STRATEGY=futures
-      - TOPSTEPX_STREAM_SYMBOLS=CON.F.US.MES.H26
       - TOPSTEP_REFRESH_TOKEN=${TOPSTEP_REFRESH_TOKEN:-}
       - MIRROR_AGENT=${MIRROR_AGENT:-}
     command: >

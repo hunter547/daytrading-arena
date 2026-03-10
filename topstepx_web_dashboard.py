@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from sim_account_manager import SimAccountManager
@@ -54,7 +54,7 @@ def create_app(
     """
     app = FastAPI(title="TopstepX Agent Arena", docs_url=None, redoc_url=None)
 
-    view_only = os.getenv("DASHBOARD_VIEW_ONLY", "").lower() in ("1", "true", "yes")
+    reset_password = os.getenv("RESET_PASSWORD", "")
 
     # Cached sim portfolio snapshots per agent
     _agent_snapshots: dict[str, dict] = {}
@@ -77,6 +77,15 @@ def create_app(
         """Background task that refreshes all agents' portfolio data."""
         while True:
             try:
+                # Seed agent names from DB if we don't have any yet
+                if not _agent_snapshots and not (get_all_agents_state and get_all_agents_state()):
+                    try:
+                        db_names = await sim_manager.get_all_agent_names()
+                        for n in db_names:
+                            _agent_snapshots.setdefault(n, {})
+                    except Exception:
+                        pass
+
                 # Refresh sim portfolios for all known agents
                 for name in _get_agent_names():
                     try:
@@ -180,6 +189,7 @@ def create_app(
                     "status": wa.status,
                     "ineligible": wa.ineligible,
                     "blown": wa.status == 6 or wa.ineligible,
+                    "name": wa.account_name,
                 }
             else:
                 snapshot["webAccount"] = {
@@ -236,6 +246,8 @@ def create_app(
                 "dailyLoss": min(0, portfolio.get("realizedDayPnl", 0)),
                 "profitAndLoss": portfolio.get("totalRealizedPnl", 0),
                 "startingBalance": portfolio.get("startingBalance", 150000),
+                "totalFees": portfolio.get("totalFees", 0),
+                "dailyFees": portfolio.get("dailyFees", 0),
             },
             "simAccount": {
                 "mllFloor": portfolio.get("mllFloor", 145500),
@@ -249,10 +261,10 @@ def create_app(
 
     def _build_ws_data() -> dict:
         """Build the full WebSocket payload with per-agent data."""
-        from unified_market_connector import UnifiedMarketConnector
+        from unified_market_connector import _is_market_open
 
         prices = dict(TopstepXAccountClient._current_prices)
-        market_open = UnifiedMarketConnector._is_market_open()
+        market_open = _is_market_open()
         agent_states = get_all_agents_state() if get_all_agents_state else {}
 
         agents_data = {}
@@ -288,19 +300,10 @@ def create_app(
         from starlette.responses import HTMLResponse
 
         html = (STATIC_DIR / "index.html").read_text()
-        if view_only:
-            import re
-            html = re.sub(
-                r'<div id="tradeSection">.*?</div>\s*</div>\s*</div>',
-                '',
-                html,
-                flags=re.DOTALL,
-            )
-        return HTMLResponse(html)
-
-    @app.get("/api/config")
-    async def api_config():
-        return {"viewOnly": view_only}
+        return HTMLResponse(
+            html,
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     @app.get("/api/portfolio")
     async def api_portfolio(agent: str = Query(default="")):
@@ -392,45 +395,31 @@ def create_app(
             return get_all_agents_state()
         return {}
 
-    @app.post("/api/buy")
-    async def api_buy(
-        contract: str = Query(...),
-        quantity: int = Query(..., gt=0),
-        agent: str = Query(default=""),
-    ):
-        if view_only:
-            return JSONResponse({"success": False, "error": "Dashboard is in view-only mode"}, 403)
-        target = agent if agent else agent_name
-        result = await sim_manager.execute_buy(target, contract, quantity)
-        return result
-
-    @app.post("/api/sell")
-    async def api_sell(
-        contract: str = Query(...),
-        quantity: int = Query(..., gt=0),
-        agent: str = Query(default=""),
-    ):
-        if view_only:
-            return JSONResponse({"success": False, "error": "Dashboard is in view-only mode"}, 403)
-        target = agent if agent else agent_name
-        result = await sim_manager.execute_sell(target, contract, quantity)
-        return result
-
-    @app.post("/api/close")
-    async def api_close(contract: str = Query(...), agent: str = Query(default="")):
-        if view_only:
-            return JSONResponse({"success": False, "error": "Dashboard is in view-only mode"}, 403)
-        target = agent if agent else agent_name
-        result = await sim_manager.execute_close(target, contract)
-        return result
+    @app.get("/api/contracts")
+    async def api_contracts():
+        """Get all active tradeable contracts."""
+        contracts = await sim_manager.get_active_contracts()
+        return contracts
 
     @app.post("/api/reset-account")
-    async def api_reset_account(agent: str = Query(default="")):
-        """Reset a sim account back to starting balance. Requires confirmation."""
-        if view_only:
-            return JSONResponse({"success": False, "error": "Dashboard is in view-only mode"}, 403)
+    async def api_reset_account(request: Request, agent: str = Query(default="")):
+        """Reset a sim account back to starting balance. Requires password if set."""
+        if reset_password:
+            try:
+                body = await request.json()
+                pw = body.get("password", "")
+            except Exception:
+                pw = ""
+            if pw != reset_password:
+                return JSONResponse({"success": False, "error": "Invalid password"}, 403)
         target = agent if agent else agent_name
         result = await sim_manager.reset_account(target)
+        if result.get("success"):
+            try:
+                from topstepx_trading_tools import clear_blown_cache
+                clear_blown_cache(target)
+            except ImportError:
+                pass
         return result
 
     # ── WebSocket ─────────────────────────────────────────────────

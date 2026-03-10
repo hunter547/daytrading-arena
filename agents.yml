@@ -6,7 +6,7 @@
 #   docker compose -f docker-compose.host-network.yml restart agents
 
 models:
-  gpt5-nano:
+  gpt-5-nano:
     model_id: gpt-5-nano
     api_key_env: OPENAI_API_KEY      # env var name containing the key
     reasoning_effort: low
@@ -20,6 +20,37 @@ models:
     base_url: https://openrouter.ai/api/v1
     logo: stepfun
 
+  nemotron-3-nano:
+    model_id: nvidia/nemotron-3-nano-30b-a3b:free
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: nvidia
+
+  hermes-405b:
+    model_id: nousresearch/hermes-3-llama-3.1-405b:free
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: nousresearch
+
+  trinity-large-preview:
+    model_id: arcee-ai/trinity-large-preview:free
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: arcee
+
+  mistral-small:
+    model_id: mistralai/mistral-small-3.1-24b-instruct:free
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: mistral
+
+  glm-4.5-air:
+    model_id: z-ai/glm-4.5-air:free
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: zhipu
+
+
   # claude-sonnet:
   #   model_id: anthropic/claude-sonnet-4-6
   #   api_key_env: OPENROUTER_API_KEY
@@ -27,17 +58,21 @@ models:
 
 agents:
   gpt-trader:
-    model: gpt5-nano
+    model: gpt-5-nano
     strategy: futures
-  
+
   stepfun-trader:
     model: step-3.5-flash
     strategy: futures
 
-  # yolo-trader:
-  #   model: deepseek-r1
-  #   strategy: brainrot
+  mistral-trader:
+    model: mistral-small
+    strategy: momentum
 
-  # scalp-bot:
-  #   model: claude-sonnet
-  #   strategy: scalper
+  zhipu-trader:
+    model: glm-4.5-air
+    strategy: brainrot
+
+  trinity-scalper:
+    model: trinity-large-preview
+    strategy: scalper
