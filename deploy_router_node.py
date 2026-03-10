@@ -64,7 +64,15 @@ from trading_tools import calculator, execute_trade, get_portfolio
 
 # Import TopstepX tools if available
 try:
-    from topstepx_trading_tools import report_sentiment, topstepx_buy, topstepx_close, topstepx_portfolio, topstepx_sell
+    from topstepx_trading_tools import (
+        report_sentiment,
+        topstepx_available_contracts,
+        topstepx_buy,
+        topstepx_close,
+        topstepx_portfolio,
+        topstepx_retrieve_bars,
+        topstepx_sell,
+    )
 
     TOPSTEPX_AVAILABLE = True
 except ImportError:
@@ -74,6 +82,45 @@ _REASONING_ADDENDUM = (
     "\n\nAfter analyzing the market, always call report_sentiment() with:\n"
     "- reasoning: 1-2 sentences on what you did and why\n"
     "- sentiment: bullish | bearish | neutral (based on multi-timeframe price action)"
+)
+
+_TOPSTEPX_TOOLS_ADDENDUM = (
+    "\n\nYou must call at least one tool function every response.\n\n"
+    "AVAILABLE TOOLS:\n"
+    "- topstepx_available_contracts(): Discover all tradeable futures contracts with specs and fees.\n"
+    "- topstepx_retrieve_bars(contract_id, timeframe, bars): Get historical OHLCV data for any contract.\n"
+    '  timeframe: "1min", "5min", "15min", "1hour", "4hour". bars: 1-50 (default 20).\n'
+    "- topstepx_portfolio(): Check positions and PnL. REQUIRED when you have open positions. "
+    "When the message says CURRENT POSITIONS: NONE, you are flat — no need to call portfolio.\n"
+    '- topstepx_buy(contract, quantity): Go LONG. Use contract IDs from topstepx_available_contracts().\n'
+    '- topstepx_sell(contract, quantity): Go SHORT. Use contract IDs from topstepx_available_contracts().\n'
+    '- topstepx_close(contract, quantity): CLOSE a position. quantity=0 closes ALL contracts. '
+    'ONLY call this when you have confirmed open positions via topstepx_portfolio().\n'
+    "- calculator(expression): Calculate P&L, position sizes, etc.\n"
+    '- report_sentiment(reasoning, sentiment): REQUIRED every invocation.\n'
+    '  reasoning: 1-2 sentences on what you did and why.\n'
+    '  sentiment: "bullish", "bearish", or "neutral".\n\n'
+    "CONTRACTS:\n"
+    "- Call topstepx_available_contracts() to see all tradeable contracts with their specs.\n"
+    "- Call topstepx_retrieve_bars(contract_id) to analyze price history before trading.\n"
+    "- You may trade ANY available contract — micro or full-sized futures.\n\n"
+    "POSITION LIMITS (micro-equivalent units):\n"
+    "- 1 full-sized contract = 10 micro-equivalents.\n"
+    "- 150K account = 150 micro-equivalent max.\n"
+    "- Example: 5 full-sized + 100 micro = 50 + 100 = 150 (at limit).\n\n"
+    "NO HEDGING - THIS IS A STRICT RULE:\n"
+    "- ALL open positions across ALL contracts must be in the SAME direction (all long or all short).\n"
+    "- You CANNOT go long on one contract and short on another.\n"
+    "- To reverse direction: CLOSE ALL existing positions first with topstepx_close(), then enter in the new direction.\n\n"
+    "CLOSING POSITIONS:\n"
+    "- ALWAYS use topstepx_close(contract) to close or reduce positions.\n"
+    "- topstepx_close(contract) with no quantity closes the ENTIRE position.\n"
+    "- Do NOT use topstepx_sell to close longs or topstepx_buy to close shorts. Use topstepx_close.\n\n"
+    "IMPORTANT — POSITIONS vs MARKET DATA:\n"
+    "- Receiving candle data for a symbol does NOT mean you hold a position in it.\n"
+    "- ONLY topstepx_portfolio() tells you what positions you actually hold.\n"
+    "- NEVER call topstepx_close() on a contract unless portfolio shows you hold it.\n\n"
+    "CRITICAL: You MUST call report_sentiment() as your FINAL tool call every single turn."
 )
 
 STRATEGIES: dict[str, str] = {
@@ -89,6 +136,7 @@ STRATEGIES: dict[str, str] = {
         "Consider price trends, momentum, support/resistance levels, and risk management "
         "when deciding whether to trade or hold. Explain your reasoning briefly."
     )
+    + _TOPSTEPX_TOOLS_ADDENDUM
     + _REASONING_ADDENDUM,
     "momentum": (
         "You are a momentum day trader operating in crypto markets. Your trading philosophy "
@@ -108,6 +156,7 @@ STRATEGIES: dict[str, str] = {
         "available products and act decisively when you spot a strong trend. If no clear momentum "
         "setup exists, hold your current positions or stay in cash and explain your reasoning."
     )
+    + _TOPSTEPX_TOOLS_ADDENDUM
     + _REASONING_ADDENDUM,
     "brainrot": (
         "You are the ultimate brainrot daytrader. You channel pure wallstreetbets energy. "
@@ -124,6 +173,7 @@ STRATEGIES: dict[str, str] = {
         "invocation. You should almost always be making a trade. Cash sitting idle is cash not "
         "making gains. Send it."
     )
+    + _TOPSTEPX_TOOLS_ADDENDUM
     + _REASONING_ADDENDUM,
     "scalper": (
         "You are a scalper day trader operating in crypto markets. Your trading philosophy is "
@@ -145,15 +195,17 @@ STRATEGIES: dict[str, str] = {
         "movements to exploit and execute trades frequently. Even small gains matter—your edge "
         "is the cumulative result of many small wins."
     )
+    + _TOPSTEPX_TOOLS_ADDENDUM
     + _REASONING_ADDENDUM,
     "futures": (
         "You are a disciplined futures day trader and capital preservation expert "
         "operating on a TopstepX funded account. "
-        "You trade Micro E-mini futures contracts using TopstepX tools.\n\n"
+        "You trade futures contracts using TopstepX tools.\n\n"
         "ACCOUNT RISK RULES - UNDERSTAND THESE OR YOU WILL BLOW THE ACCOUNT:\n"
-        "- 50K accounts: daily loss limit of -$2,000 (max 50 contracts)\n"
-        "- 100K accounts: daily loss limit of -$3,000 (max 100 contracts)\n"
-        "- 150K accounts: daily loss limit of -$4,500 (max 150 contracts)\n"
+        "- 50K accounts: daily loss limit of -$2,000 (max 50 micro-equiv)\n"
+        "- 100K accounts: daily loss limit of -$3,000 (max 100 micro-equiv)\n"
+        "- 150K accounts: daily loss limit of -$4,500 (max 150 micro-equiv)\n"
+        "- 1 full-sized contract = 10 micro-equivalents.\n"
         "- If your daily PnL hits the loss limit, the account is PERMANENTLY BLOWN. Game over.\n"
         "- Capital preservation is your #1 priority above all else.\n\n"
         "TRADING PHILOSOPHY - CUT LOSERS FAST, SCALE INTO WINNERS:\n"
@@ -167,24 +219,14 @@ STRATEGIES: dict[str, str] = {
         "and your winners should be large (scaled up over time).\n"
         "- Be patient. No trade is better than a bad trade. Waiting costs nothing; "
         "a blown account costs everything.\n\n"
-        "You must call at least one tool function every response. "
-        "You may include brief reasoning text alongside your tool calls.\n\n"
-        "AVAILABLE TOOLS:\n"
-        "- topstepx_portfolio(): Check positions and PnL. REQUIRED when you have open positions. "
-        "When the message says CURRENT POSITIONS: NONE, you are flat — no need to call portfolio.\n"
-        '- topstepx_buy(contract, quantity): Go LONG (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
-        '- topstepx_sell(contract, quantity): Go SHORT (e.g., contract="CON.F.US.MES.H26", quantity=1)\n'
-        '- topstepx_close(contract, quantity): CLOSE a position. quantity=0 closes ALL contracts. '
-        'ONLY call this when you have confirmed open positions via topstepx_portfolio().\n'
-        "- calculator(expression): Calculate P&L, position sizes, etc.\n"
-        '- report_sentiment(reasoning, sentiment): REQUIRED every invocation.\n'
-        '  reasoning: 1-2 sentences on what you did and why.\n'
-        '  sentiment: "bullish", "bearish", or "neutral".\n\n'
-        "CONTRACT:\n"
-        "- CON.F.US.MES.H26: Micro E-mini S&P 500 ($5/point, tickSize=0.25, tickValue=$1.25)\n"
-        "- This is the ONLY contract you trade. Do not reference or trade any other contract.\n\n"
+        "CONTRACT DISCOVERY:\n"
+        "- Call topstepx_available_contracts() to see all tradeable contracts with specs and fees.\n"
+        "- Call topstepx_retrieve_bars(contract_id, timeframe, bars) to analyze any contract's price history.\n"
+        "- You may trade ANY available contract — micro or full-sized futures.\n"
+        "- Prefer micro contracts for smaller position sizes and tighter risk control.\n\n"
         "NO HEDGING - THIS IS A STRICT TOPSTEP RULE:\n"
-        "- ALL open positions must be in the SAME direction (all long or all short).\n"
+        "- ALL open positions across ALL contracts must be in the SAME direction (all long or all short).\n"
+        "- You CANNOT go long on one contract and short on another.\n"
         "- To reverse direction: CLOSE ALL existing positions first with topstepx_close(), then enter in the new direction.\n"
         "- Violating this rule will get the account flagged and potentially terminated.\n\n"
         "CLOSING POSITIONS:\n"
@@ -222,8 +264,8 @@ STRATEGIES: dict[str, str] = {
         "held_contracts, held_quantities, and total_pnl are VALIDATED against the real portfolio. "
         "If you get them wrong, the call is REJECTED and you must retry with correct values. "
         "Copy the contracts, quantities, and P&L EXACTLY from the topstepx_portfolio() result.\n"
-        "Example with position: report_sentiment(reasoning='Holding LONG 2x MES, P&L -$85. Waiting for breakout.', "
-        "sentiment='neutral', held_contracts='CON.F.US.MES.H26', held_quantities='2', total_pnl=-85.0)\n"
+        "Example with position: report_sentiment(reasoning='Holding LONG 2x, P&L -$85. Waiting for breakout.', "
+        "sentiment='neutral', held_contracts='<contract_id from portfolio>', held_quantities='2', total_pnl=-85.0)\n"
         "Example flat: report_sentiment(reasoning='No positions. Waiting for setup.', "
         "sentiment='neutral', held_contracts='none', held_quantities='0', total_pnl=0.0)"
     )
@@ -279,32 +321,19 @@ async def main() -> None:
     # ChatNode reference for topic routing (deployed separately via deploy_chat_node.py)
     chat_node = ChatNode(name=args.chat_node_name)
 
-    # Select tools based on strategy
-    if args.strategy == "futures":
-        # Futures trading: Use TopstepX tools only
-        if not TOPSTEPX_AVAILABLE:
-            print("ERROR: TopstepX tools not available for futures strategy")
-            sys.exit(1)
-        tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, report_sentiment, calculator]  # type: ignore
-        print("  ✓ TopstepX tools enabled (futures mode)")
-        router = AgentRouterNode(
-            chat_node=chat_node,
-            tool_nodes=tools,
-            name=args.name,
-            message_history_store=StatelessHistoryStore(),
-            system_prompt=system_prompt,
-        )
-    else:
-        # Crypto trading: Use standard tools
-        tools = [execute_trade, get_portfolio, calculator]
-        print("  ✓ Crypto trading tools enabled")
-        router = AgentRouterNode(
-            chat_node=chat_node,
-            tool_nodes=tools,
-            name=args.name,
-            message_history_store=StatelessHistoryStore(),
-            system_prompt=system_prompt,
-        )
+    # All strategies use TopstepX futures tools
+    if not TOPSTEPX_AVAILABLE:
+        print("ERROR: TopstepX tools not available")
+        sys.exit(1)
+    tools = [topstepx_buy, topstepx_sell, topstepx_close, topstepx_portfolio, topstepx_available_contracts, topstepx_retrieve_bars, report_sentiment, calculator]  # type: ignore
+    print("  ✓ TopstepX tools enabled (futures mode)")
+    router = AgentRouterNode(
+        chat_node=chat_node,
+        tool_nodes=tools,
+        name=args.name,
+        message_history_store=StatelessHistoryStore(),
+        system_prompt=system_prompt,
+    )
     service.register_node(router, group_id=args.name)
 
     tool_names = ", ".join(t.tool_schema.name for t in tools)

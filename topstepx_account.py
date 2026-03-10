@@ -462,12 +462,19 @@ class TopstepXAccountClient:
             logger.debug(f"Position data: {data}")
             return None
     
+    # Class-level rate limit backoff for retrieveBars
+    _price_poll_backoff_until: float = 0.0
+
     async def _fetch_current_price(self, contract_id: str) -> Optional[float]:
         """Fetch the current price for a contract via the History API.
 
         Retrieves the most recent 1-minute bar and returns its close price.
         Updates the in-memory price cache on success.
         """
+        import time as _time
+        if _time.time() < TopstepXAccountClient._price_poll_backoff_until:
+            return None  # still in backoff
+
         try:
             url = f"{self._api_base}/api/History/retrieveBars"
             now = datetime.now(timezone.utc)
@@ -482,6 +489,10 @@ class TopstepXAccountClient:
                 "includePartialBar": True,
             }
             response = await self._http_client.post(url, json=payload)
+            if response.status_code == 429:
+                TopstepXAccountClient._price_poll_backoff_until = _time.time() + 60.0
+                logger.warning("Price poll 429 — backing off 60s")
+                return None
             response.raise_for_status()
             data = response.json()
 
@@ -489,7 +500,6 @@ class TopstepXAccountClient:
                 bars = data.get("bars", [])
                 if bars:
                     price = float(bars[-1]["c"])
-                    self.update_market_price(contract_id, price)
                     return price
         except Exception as e:
             logger.debug(f"Failed to fetch current price for {contract_id}: {e}")
@@ -555,6 +565,8 @@ class TopstepXPriceStreamer:
         self._market_task: Optional[asyncio.Task] = None
         self._user_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+        self._market_ws = None  # live WebSocket for dynamic subscriptions
+        self._sub_counter = 0   # invocation ID counter
 
     # ── Market Hub (live prices) ──────────────────────────────────
 
@@ -576,15 +588,18 @@ class TopstepXPriceStreamer:
                         continue
 
                     # Subscribe to each symbol
-                    for i, symbol in enumerate(self._symbols):
+                    self._sub_counter = 0
+                    for symbol in list(self._symbols):
+                        self._sub_counter += 1
                         msg = json.dumps({
                             "type": 1,
                             "target": "SubscribeContractTrades",
                             "arguments": [symbol],
-                            "invocationId": str(i + 1),
+                            "invocationId": str(self._sub_counter),
                         }) + self.RECORD_SEPARATOR
                         await ws.send(msg)
 
+                    self._market_ws = ws
                     logger.info(f"Market Hub connected — streaming {self._symbols}")
 
                     while not self._stop_event.is_set():
@@ -607,8 +622,10 @@ class TopstepXPriceStreamer:
                             # type 3 = completion, type 6 = ping — ignore
 
             except asyncio.CancelledError:
+                self._market_ws = None
                 return
             except Exception as e:
+                self._market_ws = None
                 if not self._stop_event.is_set():
                     logger.warning(f"Market Hub disconnected: {e} — reconnecting in 2s")
                     await asyncio.sleep(2)
@@ -719,11 +736,63 @@ class TopstepXPriceStreamer:
         logger.info(f"Starting price streamer for {self._symbols}")
         self._market_task = asyncio.create_task(self._run_market_hub())
         self._user_task = asyncio.create_task(self._run_user_hub())
+        # Start REST polling fallback for price updates
+        self._poll_task: Optional[asyncio.Task] = asyncio.create_task(self._poll_prices_loop())
+
+    def subscribe(self, contract_id: str) -> None:
+        """Dynamically add a contract to the price streaming set.
+
+        Called when an agent enters a position in a new contract so that
+        live PnL calculations can occur. Sends SubscribeContractTrades
+        on the live WebSocket if connected.
+        """
+        if contract_id not in self._symbols:
+            self._symbols.add(contract_id)
+            logger.info(f"Price streamer: subscribed to {contract_id} (total: {len(self._symbols)})")
+            # Send subscription on live WebSocket
+            if self._market_ws is not None:
+                self._sub_counter += 1
+                msg = json.dumps({
+                    "type": 1,
+                    "target": "SubscribeContractTrades",
+                    "arguments": [contract_id],
+                    "invocationId": str(self._sub_counter),
+                }) + self.RECORD_SEPARATOR
+                asyncio.ensure_future(self._market_ws.send(msg))
+
+    def unsubscribe(self, contract_id: str) -> None:
+        """Remove a contract from the price streaming set.
+
+        Called when all positions in a contract are closed.
+        Does NOT remove contracts from the initial set.
+        """
+        if contract_id in self._symbols:
+            self._symbols.discard(contract_id)
+            logger.info(f"Price streamer: unsubscribed from {contract_id} (total: {len(self._symbols)})")
+
+    async def _poll_prices_loop(self) -> None:
+        """REST polling fallback: fetch latest price for all subscribed symbols every 15s.
+
+        This ensures live PnL works even when SignalR is broken.
+        Uses 15s interval to stay well within the 50 req/30s rate limit.
+        """
+        while not self._stop_event.is_set():
+            try:
+                for symbol in list(self._symbols):
+                    if self._account_client:
+                        await self._account_client._fetch_current_price(symbol)
+                    if self._stop_event.is_set():
+                        break
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.debug(f"Price poll error: {e}")
+            await asyncio.sleep(15)
 
     async def stop(self) -> None:
         """Stop all streaming."""
         self._stop_event.set()
-        for task in (self._market_task, self._user_task):
+        for task in (self._market_task, self._user_task, getattr(self, '_poll_task', None)):
             if task:
                 task.cancel()
                 try:

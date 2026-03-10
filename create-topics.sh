@@ -7,7 +7,6 @@ BROKER="${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}"
 TOPICS=(
   "agent_router.input"
   "agent_router.output"
-  "market_data.futures_prices"
   "tool_node.topstepx_buy.request"
   "tool_node.topstepx_buy.result"
   "tool_node.topstepx_sell.request"
@@ -18,6 +17,10 @@ TOPICS=(
   "tool_node.topstepx_portfolio.result"
   "tool_node.report_sentiment.request"
   "tool_node.report_sentiment.result"
+  "tool_node.topstepx_available_contracts.request"
+  "tool_node.topstepx_available_contracts.result"
+  "tool_node.topstepx_retrieve_bars.request"
+  "tool_node.topstepx_retrieve_bars.result"
   "tool_node.calculator.request"
   "tool_node.calculator.result"
 )
