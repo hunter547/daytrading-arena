@@ -5,6 +5,9 @@ Provides @agent_tool functions that allow AI agents to execute simulated trades
 backed by MySQL persistent accounts. Real market prices from the TopstepX RTC
 feed drive realistic P&L calculation — only order execution is simulated.
 
+A single "promoted" agent can have its sim trades mirrored to a real TopstepX
+account (practice, combine, or funded) via PROMOTED_AGENT + TOPSTEPX_ACCOUNT_ID.
+
 Usage:
     python topstepx_trading_tools.py --bootstrap-servers localhost:9092
 """
@@ -80,6 +83,25 @@ class TopstepXTradingClient:
                 return int(account.account_id)
         return None
 
+    async def get_account_id(self, account_id: Optional[int] = None) -> Optional[int]:
+        """Get account ID — either the specified one or auto-detect practice.
+
+        Args:
+            account_id: Specific account ID to validate, or None to auto-detect
+
+        Returns:
+            Validated account ID, or None if not found
+        """
+        if account_id is not None:
+            # Validate the account exists and is accessible
+            accounts = await self._account_client.get_accounts()
+            for account in accounts:
+                if int(account.account_id) == account_id:
+                    logger.info(f"Validated TopstepX account: {account.name} (ID: {account_id})")
+                    return account_id
+            logger.warning(f"Account {account_id} not found — falling back to practice account")
+        return await self.get_practice_account_id()
+
     async def place_market_order(self, account_id: int, contract_id: str, side: int, size: int) -> dict:
         url = f"{self._api_base}/api/Order/place"
         payload = {
@@ -142,18 +164,12 @@ class TopstepXTradingClient:
             return {"success": False, "error": str(e)}
 
     async def get_account_summary(self, account_id: int) -> dict:
-        accounts = await self._account_client.get_accounts()
+        accounts = await self._account_client.get_accounts(only_active=True)
         target = None
         for account in accounts:
             if str(account.account_id) == str(account_id):
                 target = account
                 break
-        if target is None:
-            for account in accounts:
-                if "PRAC" in account.name:
-                    target = account
-                    logger.info(f"Account {account_id} not found, using {account.account_id} ({account.name})")
-                    break
         if target is None:
             return {"error": f"Account {account_id} not found"}
         return {
@@ -182,12 +198,13 @@ class TopstepXTradingClient:
 
 _sim_manager: Optional[SimAccountManager] = None
 _trading_client: Optional[TopstepXTradingClient] = None
-_practice_account_id: Optional[int] = None
+_live_account_id: Optional[int] = None  # TopstepX account (practice, combine, or funded)
 _price_streamer: Optional[TopstepXPriceStreamer] = None
+_promoted_agent: str = ""  # Agent name whose trades mirror to the live TopstepX account
 
 
 def _init_client():
-    """Initialize TopstepX trading client (for real practice account + RTC prices)."""
+    """Initialize TopstepX trading client (for real account + RTC prices)."""
     global _trading_client
 
     if _trading_client is not None:
@@ -200,51 +217,119 @@ def _init_client():
 
     api_url = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com")
     _trading_client = TopstepXTradingClient(jwt_token, api_url)
-    logger.info("TopstepX trading client initialized (for RTC + real trading mirror)")
+    logger.info("TopstepX trading client initialized (for RTC + real trading)")
 
 
-async def _ensure_practice_account(force_refresh: bool = False):
-    """Ensure practice account ID is loaded."""
-    global _practice_account_id
+async def _ensure_live_account(force_refresh: bool = False):
+    """Ensure TopstepX live account ID is loaded.
+
+    Priority:
+    1. TOPSTEPX_ACCOUNT_ID env var (combine/funded/practice — explicit)
+    2. Auto-detect practice account (PRAC-*)
+    """
+    global _live_account_id
 
     if _trading_client is None:
         return None
 
-    if _practice_account_id is None or force_refresh:
-        new_id = await _trading_client.get_practice_account_id()
+    if _live_account_id is None or force_refresh:
+        explicit_id = os.getenv("TOPSTEPX_ACCOUNT_ID", "").strip()
+        requested_id = int(explicit_id) if explicit_id else None
+        new_id = await _trading_client.get_account_id(requested_id)
         if new_id:
-            if new_id != _practice_account_id:
-                logger.info(f"Practice account ID updated: {_practice_account_id} -> {new_id}")
-            _practice_account_id = new_id
+            if new_id != _live_account_id:
+                logger.info(f"TopstepX live account ID: {_live_account_id} -> {new_id}")
+            _live_account_id = new_id
         else:
-            logger.warning("No practice account found")
+            logger.warning("No TopstepX account found")
 
-    return _practice_account_id
+    return _live_account_id
 
 
-async def _mirror_to_practice(action: str, contract: str, quantity: int) -> None:
-    """Mirror a simulated trade to the real TopstepX practice account.
+async def _mirror_to_live(action: str, contract: str, quantity: int, agent_name: str) -> dict:
+    """Mirror a simulated trade to the real TopstepX account.
 
-    Called only for the designated 'best agent' (controlled by MIRROR_AGENT env var).
-    Failures are logged but never block the sim trade.
+    Called only for the promoted agent. Returns the API result dict.
+    Failures are logged and recorded in the agent's activity feed but never
+    block the sim trade.
     """
-    if _trading_client is None or _practice_account_id is None:
-        return
+    if _trading_client is None or _live_account_id is None:
+        return {"success": False, "error": "No live account"}
+
+    result = {}
     try:
         if action == "BUY":
-            await _trading_client.place_market_order(
-                _practice_account_id, contract, OrderSide.BUY, quantity)
+            result = await _trading_client.place_market_order(
+                _live_account_id, contract, OrderSide.BUY, quantity)
         elif action == "SELL":
-            await _trading_client.place_market_order(
-                _practice_account_id, contract, OrderSide.SELL, quantity)
+            result = await _trading_client.place_market_order(
+                _live_account_id, contract, OrderSide.SELL, quantity)
         elif action == "CLOSE":
             if quantity == 0:
-                await _trading_client.close_position(_practice_account_id, contract)
+                result = await _trading_client.close_position(_live_account_id, contract)
             else:
-                await _trading_client.partial_close_position(_practice_account_id, contract, quantity)
-        logger.info(f"MIRROR -> practice: {action} {quantity}x {contract}")
+                result = await _trading_client.partial_close_position(_live_account_id, contract, quantity)
+
+        if result.get("success"):
+            logger.info(f"LIVE MIRROR -> account {_live_account_id}: {action} {quantity}x {contract}")
+            activity = _get_agent_activity(agent_name)
+            activity.append({
+                "ts": datetime.now().isoformat(),
+                "type": "LIVE_ORDER",
+                "msg": f"LIVE {action} {quantity}x {contract} — filled on TopstepX account {_live_account_id}",
+            })
+        else:
+            error = result.get("error", "Unknown error")
+            logger.error(f"LIVE MIRROR FAILED: {action} {quantity}x {contract} — {error}")
+            activity = _get_agent_activity(agent_name)
+            activity.append({
+                "ts": datetime.now().isoformat(),
+                "type": "LIVE_ORDER_FAIL",
+                "msg": f"LIVE {action} FAILED: {contract} — {error}",
+            })
     except Exception as e:
-        logger.error(f"Mirror to practice failed: {e}")
+        logger.error(f"LIVE MIRROR ERROR: {action} {quantity}x {contract} — {e}")
+        activity = _get_agent_activity(agent_name)
+        activity.append({
+            "ts": datetime.now().isoformat(),
+            "type": "LIVE_ORDER_FAIL",
+            "msg": f"LIVE {action} ERROR: {contract} — {e}",
+        })
+        result = {"success": False, "error": str(e)}
+
+    return result
+
+
+async def _check_live_hedging(agent_name: str, side: str) -> Optional[str]:
+    """Check real TopstepX positions for hedging conflicts.
+
+    When the promoted agent tries to BUY, reject if the live account has shorts.
+    When the promoted agent tries to SELL, reject if the live account has longs.
+
+    Returns an error message if blocked, or None if OK.
+    """
+    if not _promoted_agent or agent_name != _promoted_agent:
+        return None
+    if _trading_client is None or _live_account_id is None:
+        return None
+
+    try:
+        positions = await _trading_client._account_client.get_positions(_live_account_id)
+        for pos in positions:
+            if side == "BUY" and pos.quantity < 0:
+                return (
+                    f"BLOCKED: Live TopstepX account has SHORT {abs(pos.quantity)}x {pos.symbol}. "
+                    f"Close that position on TopstepX first."
+                )
+            elif side == "SELL" and pos.quantity > 0:
+                return (
+                    f"BLOCKED: Live TopstepX account has LONG {pos.quantity}x {pos.symbol}. "
+                    f"Close that position on TopstepX first."
+                )
+    except Exception as e:
+        logger.error(f"Failed to check live positions for hedging: {e}")
+        # Fail open — don't block the sim trade if we can't check
+    return None
 
 
 # ── Agent activity state ─────────────────────────────────────────
@@ -475,6 +560,87 @@ def _consume_reset_notice(agent_name: str) -> str:
 
 _BLOWN_MSG = "⛔ ACCOUNT BLOWN — trading is permanently disabled. Do NOT call any more tools."
 
+# ── Evaluation limit tracking ────────────────────────────────────
+_dpl_agents: dict[str, float] = {}  # agent_name -> monotonic timestamp when DPL was hit
+_pg_agents: dict[str, float] = {}   # agent_name -> monotonic timestamp when PG was hit
+_EVAL_CACHE_TTL = 60.0  # re-check DB every 60s so daily resets are picked up
+
+_DPL_MSG = (
+    "⛔ DAILY PROFIT LIMIT REACHED — you have hit the maximum allowed profit for today. "
+    "Trading is DISABLED for the rest of this session. Do NOT call any more tools. "
+    "Your positions have been closed. Trading will resume tomorrow."
+)
+_PG_MSG = (
+    "🏆 EVALUATION PASSED — your account has reached the profit goal! "
+    "Trading is DISABLED. Do NOT call any more tools. Congratulations!"
+)
+
+
+async def _check_eval_limits(agent_name: str) -> Optional[str]:
+    """Check if agent has hit Daily Profit Limit or Profit Goal.
+
+    Returns None if trading is allowed, or a stop message string if not.
+    Uses TTL-based caching like _check_blown().
+    """
+    now = _time.monotonic()
+
+    # Check PG cache first (permanent stop)
+    cached_at = _pg_agents.get(agent_name)
+    if cached_at is not None and (now - cached_at) < _EVAL_CACHE_TTL:
+        return _PG_MSG
+
+    # Check DPL cache (daily stop)
+    cached_at = _dpl_agents.get(agent_name)
+    if cached_at is not None and (now - cached_at) < _EVAL_CACHE_TTL:
+        return _DPL_MSG
+
+    if _sim_manager is None:
+        return None
+
+    portfolio = await _sim_manager.get_portfolio(agent_name)
+    if portfolio.get("error"):
+        return None
+
+    from sim_account_manager import get_eval_rules
+    starting_balance = portfolio["startingBalance"]
+    dpl, pg = get_eval_rules(starting_balance)
+
+    realized_day_pnl = portfolio["realizedDayPnl"]
+    balance = portfolio["balance"]
+    profit_from_start = balance - starting_balance
+
+    # Check Profit Goal first (balance >= starting + PG)
+    if profit_from_start >= pg:
+        _pg_agents[agent_name] = now
+        logger.info(f"🏆 EVAL PASSED: {agent_name} balance ${balance:,.2f} >= goal ${starting_balance + pg:,.2f}")
+        return _PG_MSG
+
+    # Check Daily Profit Limit (realized day P&L >= DPL)
+    if realized_day_pnl >= dpl:
+        _dpl_agents[agent_name] = now
+        logger.info(f"⛔ DPL HIT: {agent_name} realized today ${realized_day_pnl:,.2f} >= limit ${dpl:,.2f}")
+        # Auto-close any open positions
+        if portfolio.get("positions"):
+            try:
+                positions = await _sim_manager.get_positions(agent_name)
+                for pos in positions:
+                    await _sim_manager.execute_close(agent_name, pos["symbol"], 0)
+                logger.info(f"Auto-closed all positions for {agent_name} (DPL hit)")
+                activity = _get_agent_activity(agent_name)
+                activity.append({
+                    "ts": datetime.now().isoformat(),
+                    "type": "DPL_LIQUIDATION",
+                    "msg": f"Daily profit limit ${dpl:,.0f} reached — all positions auto-closed",
+                })
+            except Exception as e:
+                logger.error(f"Error auto-closing positions for {agent_name} on DPL: {e}")
+        return _DPL_MSG
+
+    # Clear stale caches if limits not hit (e.g., after daily reset)
+    _dpl_agents.pop(agent_name, None)
+    _pg_agents.pop(agent_name, None)
+    return None
+
 
 def _ensure_price_streaming(contract_id: str) -> None:
     """Subscribe to price streaming for a contract (for live PnL)."""
@@ -532,7 +698,14 @@ async def topstepx_buy(
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
     if await _check_blown(agent_name):
         return _BLOWN_MSG
+    eval_msg = await _check_eval_limits(agent_name)
+    if eval_msg:
+        return eval_msg
     logger.info(f"🔵 SIM BUY ORDER: {agent_name} {quantity}x {contract}")
+    hedge_err = await _check_live_hedging(agent_name, "BUY")
+    if hedge_err:
+        logger.error(f"❌ HEDGING BLOCKED: {hedge_err}")
+        return f"❌ {hedge_err}"
     await _ensure_live_price(contract)
     result = await _sim_manager.execute_buy(agent_name, contract, quantity)
 
@@ -540,10 +713,14 @@ async def topstepx_buy(
         price = result["fill_price"]
         fee = result.get("fee", 0)
         logger.info(f"✅ SIM BUY FILLED: {quantity}x {contract} @ ${price:,.2f} | Fee: ${fee:,.2f}")
-        # Mirror to real practice account if this is the designated agent
-        mirror_agent = os.getenv("MIRROR_AGENT", "")
-        if mirror_agent and agent_name == mirror_agent:
-            await _mirror_to_practice("BUY", contract, quantity)
+        # Mirror to real TopstepX account if this is the promoted agent
+        live_line = ""
+        if _promoted_agent and agent_name == _promoted_agent:
+            live_result = await _mirror_to_live("BUY", contract, quantity, agent_name)
+            if live_result.get("success"):
+                live_line = f"\n  LIVE: Mirrored to TopstepX account {_live_account_id}"
+            else:
+                live_line = f"\n  LIVE MIRROR FAILED: {live_result.get('error', 'Unknown')}"
         return (
             f"✓ BUY order filled\n"
             f"  Contract: {contract}\n"
@@ -551,6 +728,7 @@ async def topstepx_buy(
             f"  Fill Price: ${price:,.2f}\n"
             f"  Commission: ${fee:,.2f}\n"
             f"  Account: {agent_name}"
+            + live_line
         )
     else:
         error = result.get("error", "Unknown error")
@@ -586,7 +764,14 @@ async def topstepx_sell(
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
     if await _check_blown(agent_name):
         return _BLOWN_MSG
+    eval_msg = await _check_eval_limits(agent_name)
+    if eval_msg:
+        return eval_msg
     logger.info(f"🔴 SIM SELL ORDER: {agent_name} {quantity}x {contract}")
+    hedge_err = await _check_live_hedging(agent_name, "SELL")
+    if hedge_err:
+        logger.error(f"❌ HEDGING BLOCKED: {hedge_err}")
+        return f"❌ {hedge_err}"
     await _ensure_live_price(contract)
     result = await _sim_manager.execute_sell(agent_name, contract, quantity)
 
@@ -594,9 +779,13 @@ async def topstepx_sell(
         price = result["fill_price"]
         fee = result.get("fee", 0)
         logger.info(f"✅ SIM SELL FILLED: {quantity}x {contract} @ ${price:,.2f} | Fee: ${fee:,.2f}")
-        mirror_agent = os.getenv("MIRROR_AGENT", "")
-        if mirror_agent and agent_name == mirror_agent:
-            await _mirror_to_practice("SELL", contract, quantity)
+        live_line = ""
+        if _promoted_agent and agent_name == _promoted_agent:
+            live_result = await _mirror_to_live("SELL", contract, quantity, agent_name)
+            if live_result.get("success"):
+                live_line = f"\n  LIVE: Mirrored to TopstepX account {_live_account_id}"
+            else:
+                live_line = f"\n  LIVE MIRROR FAILED: {live_result.get('error', 'Unknown')}"
         return (
             f"✓ SELL order filled\n"
             f"  Contract: {contract}\n"
@@ -604,6 +793,7 @@ async def topstepx_sell(
             f"  Fill Price: ${price:,.2f}\n"
             f"  Commission: ${fee:,.2f}\n"
             f"  Account: {agent_name}"
+            + live_line
         )
     else:
         error = result.get("error", "Unknown error")
@@ -635,6 +825,11 @@ async def topstepx_close(
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
     if await _check_blown(agent_name):
         return _BLOWN_MSG
+    # Allow closes when DPL is hit (positions are auto-closed, but don't block manual close)
+    # Block new trades (buy/sell) but not closing existing positions
+    pg_msg = _pg_agents.get(agent_name)
+    if pg_msg is not None and (_time.monotonic() - pg_msg) < _EVAL_CACHE_TTL:
+        return _PG_MSG
     logger.info(f"🔶 SIM CLOSE: {agent_name} {contract} qty={quantity}")
     result = await _sim_manager.execute_close(agent_name, contract, quantity)
 
@@ -643,9 +838,14 @@ async def topstepx_close(
         pnl = result["realized_pnl"]
         qty_closed = result["quantity_closed"]
         logger.info(f"✅ SIM CLOSE: {qty_closed}x {contract} @ ${price:,.2f} | PnL: ${pnl:+,.2f}")
-        mirror_agent = os.getenv("MIRROR_AGENT", "")
-        if mirror_agent and agent_name == mirror_agent:
-            await _mirror_to_practice("CLOSE", contract, quantity)
+        # Mirror close to real TopstepX account
+        live_line = ""
+        if _promoted_agent and agent_name == _promoted_agent:
+            live_result = await _mirror_to_live("CLOSE", contract, quantity, agent_name)
+            if live_result.get("success"):
+                live_line = f"  LIVE: Mirrored close to TopstepX account {_live_account_id}"
+            else:
+                live_line = f"  LIVE MIRROR FAILED: {live_result.get('error', 'Unknown')}"
         fee = result.get("fee", 0)
         lines = [
             f"✓ Position CLOSED",
@@ -656,8 +856,14 @@ async def topstepx_close(
             f"  Commission: ${fee:,.2f}",
             f"  New Balance: ${result['new_balance']:,.2f}",
         ]
+        if live_line:
+            lines.append(live_line)
         if result.get("blown"):
             lines.append(f"  ⚠️ {result['warning']}")
+        # Post-close eval limit check: if this close pushed day P&L over DPL, notify + auto-close remaining
+        post_eval = await _check_eval_limits(agent_name)
+        if post_eval:
+            lines.append(f"\n{post_eval}")
         return "\n".join(lines)
     else:
         error = result.get("error", "Unknown error")
@@ -694,6 +900,9 @@ async def report_sentiment(
     agent_name = ctx.agent_name or os.getenv("AGENT_NAME", "default")
     if await _check_blown(agent_name):
         return _BLOWN_MSG
+    eval_msg = await _check_eval_limits(agent_name)
+    if eval_msg:
+        return eval_msg
 
     # ── Rescue values from wrong arg names the LLM may use ──
     if not reasoning and kwargs:
@@ -797,6 +1006,139 @@ _bars_lock = asyncio.Lock()  # serialize concurrent retrieve_bars calls
 _bars_call_timestamps: list[float] = []
 _BARS_RATE_LIMIT = 40  # stay under 50/30s with headroom for price polling
 _BARS_RATE_WINDOW = 30.0
+
+
+def _detect_fvgs(bars: list[dict], current_price: float) -> list[str]:
+    """Detect Fair Value Gaps and Inverse FVGs from OHLCV bars.
+
+    FVG (Fair Value Gap): 3-candle imbalance where candle 1 and candle 3
+    don't overlap, leaving a gap at candle 2.
+      - Bullish FVG: bar[i-1].high < bar[i+1].low  (gap up)
+      - Bearish FVG: bar[i-1].low > bar[i+1].high   (gap down)
+
+    Status tracking using subsequent bars:
+      - untested: price hasn't returned to the gap zone
+      - tested: price wicked into the gap but closed outside (respected)
+      - filled: price closed inside or through the gap (no longer active)
+      - IFVG (invalidated): a previously tested/respected FVG that price
+        later closed through — creates a new zone in the invalidation direction
+
+    Returns list of formatted lines, or empty list if no gaps found.
+    """
+    if len(bars) < 3:
+        return []
+
+    fvgs: list[dict] = []
+
+    for i in range(1, len(bars) - 1):
+        h_prev = float(bars[i - 1]["h"])
+        l_prev = float(bars[i - 1]["l"])
+        h_next = float(bars[i + 1]["h"])
+        l_next = float(bars[i + 1]["l"])
+
+        if h_prev < l_next:
+            # Bullish FVG: gap between bar[i-1] high and bar[i+1] low
+            fvgs.append({
+                "type": "BULLISH",
+                "top": l_next,
+                "bottom": h_prev,
+                "time": bars[i]["t"],
+                "bar_idx": i,
+                "tested": False,
+                "respected": False,
+                "filled": False,
+            })
+        elif l_prev > h_next:
+            # Bearish FVG: gap between bar[i+1] high and bar[i-1] low
+            fvgs.append({
+                "type": "BEARISH",
+                "top": l_prev,
+                "bottom": h_next,
+                "time": bars[i]["t"],
+                "bar_idx": i,
+                "tested": False,
+                "respected": False,
+                "filled": False,
+            })
+
+    if not fvgs:
+        return ["Fair Value Gaps: none detected"]
+
+    # Track status using bars after each FVG formed
+    # States: untested -> tested -> respected (bounced) or filled/invalidated
+    ifvgs: list[dict] = []
+    for fvg in fvgs:
+        for j in range(fvg["bar_idx"] + 2, len(bars)):
+            bar_low = float(bars[j]["l"])
+            bar_high = float(bars[j]["h"])
+            bar_close = float(bars[j]["c"])
+
+            if fvg["type"] == "BULLISH":
+                # Price wicked into or through the gap zone
+                if bar_low <= fvg["top"]:
+                    fvg["tested"] = True
+                # After testing, price closed back above the gap = respected
+                if fvg["tested"] and bar_close > fvg["top"]:
+                    fvg["respected"] = True
+                # Price closed below the gap bottom = filled/invalidated
+                if bar_close < fvg["bottom"]:
+                    fvg["filled"] = True
+                    if fvg["tested"]:
+                        ifvgs.append({
+                            "type": "BEARISH IFVG",
+                            "top": fvg["top"],
+                            "bottom": fvg["bottom"],
+                            "time": bars[j]["t"],
+                            "origin_time": fvg["time"],
+                        })
+                    break
+            else:  # BEARISH
+                if bar_high >= fvg["bottom"]:
+                    fvg["tested"] = True
+                if fvg["tested"] and bar_close < fvg["bottom"]:
+                    fvg["respected"] = True
+                if bar_close > fvg["top"]:
+                    fvg["filled"] = True
+                    if fvg["tested"]:
+                        ifvgs.append({
+                            "type": "BULLISH IFVG",
+                            "top": fvg["top"],
+                            "bottom": fvg["bottom"],
+                            "time": bars[j]["t"],
+                            "origin_time": fvg["time"],
+                        })
+                    break
+
+    # Build output — only show active (unfilled) FVGs and recent IFVGs
+    active = [f for f in fvgs if not f["filled"]]
+    lines = ["Fair Value Gaps:"]
+
+    if not active and not ifvgs:
+        lines.append("  No active FVGs (all filled)")
+        return lines
+
+    for fvg in active:
+        status = "respected" if fvg["respected"] else "tested" if fvg["tested"] else "untested"
+        mid = (fvg["top"] + fvg["bottom"]) / 2
+        dist = current_price - mid
+        direction = "above" if dist > 0 else "below"
+        lines.append(
+            f"  {fvg['type']} FVG @ {fvg['bottom']:.2f}-{fvg['top']:.2f} "
+            f"(formed {fvg['time']}, {status}, "
+            f"price {abs(dist):.2f} {direction} midpoint)"
+        )
+
+    for ifvg in ifvgs:
+        mid = (ifvg["top"] + ifvg["bottom"]) / 2
+        dist = current_price - mid
+        direction = "above" if dist > 0 else "below"
+        lines.append(
+            f"  {ifvg['type']} @ {ifvg['bottom']:.2f}-{ifvg['top']:.2f} "
+            f"(FVG formed {ifvg['origin_time']}, invalidated {ifvg['time']}, "
+            f"price {abs(dist):.2f} {direction} midpoint)"
+        )
+
+    return lines
 
 
 @agent_tool
@@ -943,6 +1285,12 @@ async def topstepx_retrieve_bars(
                 )
             lines.append(f"\nCurrent price: ${latest_close:,.2f}")
 
+            # ── FVG / IFVG detection ───────────────────────────────
+            fvg_lines = _detect_fvgs(all_bars, latest_close)
+            if fvg_lines:
+                lines.append("")
+                lines.extend(fvg_lines)
+
             result = "\n".join(lines)
             _bars_cache[cache_key] = (_time.time(), result)
             return result
@@ -991,6 +1339,26 @@ async def topstepx_portfolio(ctx: ToolContext) -> str:
     positions = summary.get("positions", [])
     balance = summary["balance"]
 
+    # For promoted agent: use real TopstepX balance and merge live positions
+    # (e.g., positions opened directly on the TopstepX platform)
+    if _promoted_agent and agent_name == _promoted_agent and _trading_client and _live_account_id:
+        try:
+            live_summary = await _trading_client.get_account_summary(_live_account_id)
+            if "error" not in live_summary:
+                balance = live_summary["balance"]
+                logger.info(f"💼 Using live TopstepX balance: ${balance:,.2f} (sim was ${summary['balance']:,.2f})")
+
+                live_positions = live_summary.get("positions", [])
+                sim_symbols = {p["symbol"] for p in positions}
+                for lp in live_positions:
+                    if lp["symbol"] not in sim_symbols and lp["quantity"] != 0:
+                        lp["_live_only"] = True
+                        positions.append(lp)
+                        _ensure_price_streaming(lp["symbol"])
+                        logger.info(f"💼 LIVE POSITION (not in sim): {lp['symbol']} qty={lp['quantity']} avg=${lp['avgPrice']:,.2f}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch live account data for portfolio: {e}")
+
     if not positions:
         logger.info(f"💼 PORTFOLIO: No open positions | Balance: ${balance:,.2f}")
         state = _get_agent_state(agent_name)
@@ -1015,8 +1383,9 @@ async def topstepx_portfolio(ctx: ToolContext) -> str:
         pnl = pos["unrealizedPnL"]
         total_pnl += pnl
 
-        hold_parts.append(f"{direction} {abs_qty}x {pos['symbol']} (P&L: ${pnl:+,.2f})")
-        logger.info(f"💼 POSITION: {pos['symbol']} {direction} {abs_qty} @ ${avg:,.2f} | P&L: ${pnl:+,.2f}")
+        live_tag = " [LIVE]" if pos.get("_live_only") else ""
+        hold_parts.append(f"{direction} {abs_qty}x {pos['symbol']}{live_tag} (P&L: ${pnl:+,.2f})")
+        logger.info(f"💼 POSITION: {pos['symbol']}{live_tag} {direction} {abs_qty} @ ${avg:,.2f} | P&L: ${pnl:+,.2f}")
 
     equity = balance + total_pnl
 
@@ -1103,6 +1472,7 @@ async def main():
             state["model"] = model_cfg.get("model_id", model_key)
             state["strategy"] = acfg.get("strategy", "")
             state["logo"] = model_cfg.get("logo", "openai")
+            _sim_manager.register_agent_config(name, state["model"], state["strategy"])
             logger.info(f"Pre-populated dashboard panel for agent: {name} (model={state['model']}, strategy={state['strategy']})")
 
     # Start background MLL monitor + daily reset scheduler
@@ -1152,25 +1522,29 @@ async def main():
     asyncio.create_task(_market_close_monitor())
     logger.info("Market-close liquidation monitor started")
 
-    # ── Authenticate with TopstepX (for RTC prices + real trade mirroring) ──
-    if not os.getenv("TOPSTEPX_JWT_TOKEN"):
-        username = os.getenv("TOPSTEPX_USERNAME")
-        api_key = os.getenv("TOPSTEPX_API_KEY")
-        if username and api_key:
-            from topstepx_auth import authenticate_topstepx
-            logger.info("No JWT token found, authenticating with API key...")
-            jwt_token = await authenticate_topstepx(
-                username, api_key,
-                os.getenv("TOPSTEPX_ENVIRONMENT", "demo"),
-                os.getenv("TOPSTEPX_API_URL"),
-            )
-            if not jwt_token:
-                logger.warning("TopstepX authentication failed — RTC prices + trade mirroring disabled")
-            else:
-                os.environ["TOPSTEPX_JWT_TOKEN"] = jwt_token
-                logger.info("Authenticated successfully — JWT token obtained")
+    # ── Authenticate with TopstepX (always fetch fresh JWT on startup) ──
+    from topstepx_auth import TopstepXTokenManager, set_token_manager
+
+    username = os.getenv("TOPSTEPX_USERNAME")
+    api_key = os.getenv("TOPSTEPX_API_KEY")
+    _token_manager = None
+    if username and api_key:
+        _token_manager = TopstepXTokenManager(
+            username, api_key,
+            os.getenv("TOPSTEPX_ENVIRONMENT", "demo"),
+            os.getenv("TOPSTEPX_API_URL"),
+        )
+        logger.info("Authenticating with TopstepX (fresh JWT)...")
+        jwt_token = await _token_manager.start()
+        if not jwt_token:
+            logger.warning("TopstepX authentication failed — RTC prices + trade mirroring disabled")
         else:
-            logger.info("TopstepX credentials not set — RTC prices + trade mirroring disabled")
+            logger.info("Authenticated successfully — JWT token obtained (auto-refresh enabled)")
+        set_token_manager(_token_manager)
+    elif os.getenv("TOPSTEPX_JWT_TOKEN"):
+        logger.info("Using existing TOPSTEPX_JWT_TOKEN (no auto-refresh — set USERNAME + API_KEY for auto-refresh)")
+    else:
+        logger.info("TopstepX credentials not set — RTC prices + trade mirroring disabled")
 
     # Sync contracts from TopstepX API into database
     jwt_for_sync = os.getenv("TOPSTEPX_JWT_TOKEN", "")
@@ -1181,20 +1555,26 @@ async def main():
     else:
         logger.warning("No JWT token — skipping contract sync (using fallback specs)")
 
-    # Initialize TopstepX client for RTC prices, practice account stats, and trade mirroring
+    # Initialize TopstepX client for RTC prices, account stats, and live trading
     _init_client()
     _web_client = None
     _dashboard_client = None
+    global _promoted_agent
     if _trading_client:
-        await _ensure_practice_account()
-        if _practice_account_id:
-            mirror_agent = os.getenv("MIRROR_AGENT", "")
-            if mirror_agent:
-                logger.info(f"Trade mirroring enabled: {mirror_agent} -> practice account {_practice_account_id}")
+        # Register trading client's HTTP client for token refresh
+        if _token_manager:
+            _token_manager.register_http_client(_trading_client._http_client)
+
+        await _ensure_live_account()
+        if _live_account_id:
+            # PROMOTED_AGENT takes precedence over legacy MIRROR_AGENT
+            _promoted_agent = os.getenv("PROMOTED_AGENT", "") or os.getenv("MIRROR_AGENT", "")
+            if _promoted_agent:
+                logger.info(f"LIVE TRADING enabled: {_promoted_agent} -> TopstepX account {_live_account_id}")
             else:
-                logger.info(f"Practice account {_practice_account_id} found (set MIRROR_AGENT to enable mirroring)")
+                logger.info(f"TopstepX account {_live_account_id} found (set PROMOTED_AGENT to enable live trading)")
         else:
-            logger.warning("No practice account found — trade mirroring disabled")
+            logger.warning("No TopstepX account found — live trading disabled")
 
         # Initialize web clients for practice account stats
         jwt_token_val = os.getenv("TOPSTEPX_JWT_TOKEN", "")
@@ -1202,6 +1582,9 @@ async def main():
             from topstepx_web_client import TopstepDashboardClient, TopstepXWebClient
             _web_client = TopstepXWebClient(jwt_token_val)
             logger.info("TopstepX web client initialized")
+            # Register web client's HTTP client for token refresh
+            if _token_manager:
+                _token_manager.register_http_client(_web_client._http)
 
             dash_refresh = os.getenv("TOPSTEP_REFRESH_TOKEN", "").strip()
             if dash_refresh:
@@ -1212,28 +1595,43 @@ async def main():
 
     # Start real-time price streaming (subscribes dynamically when agents enter positions)
     global _price_streamer
+    price_streamer = None
     jwt_token = os.getenv("TOPSTEPX_JWT_TOKEN", "")
     if jwt_token:
         ws_base = os.getenv("TOPSTEPX_API_URL", "https://api.topstepx.com").replace("api.", "rtc.")
         price_streamer = TopstepXPriceStreamer(
             jwt_token, [], ws_base=ws_base,
             account_client=_trading_client._account_client if _trading_client else None,
-            account_id=_practice_account_id,
+            account_id=_live_account_id,
         )
+        # Register streamer for token refresh (WS URLs use token)
+        if _token_manager:
+            _token_manager.register_ws_token_setter(price_streamer.set_token)
         await price_streamer.start()
         _price_streamer = price_streamer
         logger.info("RTC price streamer started (dynamic subscription on position entry)")
 
-        # Subscribe to contracts with existing open positions
+        # Subscribe to contracts with existing open positions (sim + live)
         if _sim_manager:
             try:
                 open_symbols = await _sim_manager.get_all_open_position_symbols()
                 for sym in open_symbols:
                     price_streamer.subscribe(sym)
                 if open_symbols:
-                    logger.info(f"Subscribed to existing position contracts: {open_symbols}")
+                    logger.info(f"Subscribed to existing sim position contracts: {open_symbols}")
             except Exception as e:
-                logger.warning(f"Failed to subscribe to existing positions: {e}")
+                logger.warning(f"Failed to subscribe to existing sim positions: {e}")
+
+        # Also subscribe to any live TopstepX positions (opened on platform directly)
+        if _trading_client and _live_account_id:
+            try:
+                live_positions = await _trading_client._account_client.get_positions(_live_account_id)
+                for pos in live_positions:
+                    if pos.quantity != 0:
+                        price_streamer.subscribe(pos.symbol)
+                        logger.info(f"Subscribed to live position contract: {pos.symbol}")
+            except Exception as e:
+                logger.warning(f"Failed to subscribe to live positions: {e}")
 
     print("=" * 60)
     print("TopstepX Trading Arena (Simulated Accounts + RTC Prices)")
@@ -1257,8 +1655,10 @@ async def main():
         print(f"  ✓ {tool.tool_schema.name} - {tool.tool_schema.description}")
 
     print(f"\n✓ Simulated trading enabled for agent: {agent_name}")
-    if _practice_account_id:
-        print(f"✓ RTC prices streaming | Practice account: {_practice_account_id}")
+    if _live_account_id:
+        print(f"✓ RTC prices streaming | TopstepX account: {_live_account_id}")
+    if _promoted_agent:
+        print(f"✓ LIVE TRADING: {_promoted_agent} -> TopstepX account {_live_account_id}")
     print("\nPress Ctrl+C to stop...")
 
     # ── Start web dashboard alongside Kafka service ────────────
@@ -1270,18 +1670,18 @@ async def main():
         from topstepx_web_dashboard import create_app
 
         def _set_account_id(new_id: int):
-            global _practice_account_id
-            if new_id != _practice_account_id:
-                logger.info(f"Account ID refreshed: {_practice_account_id} -> {new_id}")
-                _practice_account_id = new_id
+            global _live_account_id
+            if new_id != _live_account_id:
+                logger.info(f"Account ID refreshed: {_live_account_id} -> {new_id}")
+                _live_account_id = new_id
 
         dashboard_app = create_app(
             sim_manager=_sim_manager,
             get_all_agents_state=get_all_agents_state,
             agent_name=agent_name,
-            mirror_agent=os.getenv("MIRROR_AGENT", ""),
+            promoted_agent=_promoted_agent,
             trading_client=_trading_client,
-            get_account_id=lambda: _practice_account_id,
+            get_account_id=lambda: _live_account_id,
             set_account_id=_set_account_id,
             web_client=_web_client,
             dashboard_client=_dashboard_client,
@@ -1331,6 +1731,8 @@ async def main():
             await _web_client.close()
         if _dashboard_client:
             await _dashboard_client.close()
+        if _token_manager:
+            await _token_manager.close()
         if _sim_manager:
             await _sim_manager.close()
 

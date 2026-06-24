@@ -171,12 +171,6 @@ class TopstepXAccountClient:
             
             accounts_data = data.get("accounts", [])
 
-            # Auto-select practice account (PRAC-*) if one exists
-            practice_accounts = [a for a in accounts_data if "PRAC" in a.get("name", "")]
-            if practice_accounts:
-                accounts_data = practice_accounts
-                logger.info(f"Auto-selected practice account: {practice_accounts[0].get('name')} (ID: {practice_accounts[0].get('id')})")
-
             accounts = []
             for acc_data in accounts_data:
                 # Determine major loss limit based on account type
@@ -236,8 +230,18 @@ class TopstepXAccountClient:
             return accounts
             
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error fetching accounts: {e.response.status_code}")
-            logger.error(f"Response: {e.response.text}")
+            if e.response.status_code == 401:
+                logger.warning("401 Unauthorized fetching accounts — attempting token refresh")
+                try:
+                    from topstepx_auth import get_token_manager
+                    mgr = get_token_manager()
+                    if mgr:
+                        await mgr.handle_401()
+                except Exception:
+                    pass
+            else:
+                logger.error(f"HTTP error fetching accounts: {e.response.status_code}")
+                logger.error(f"Response: {e.response.text}")
             return []
         except Exception as e:
             logger.error(f"Error fetching accounts: {e}")
@@ -500,6 +504,7 @@ class TopstepXAccountClient:
                 bars = data.get("bars", [])
                 if bars:
                     price = float(bars[-1]["c"])
+                    TopstepXAccountClient.update_market_price(contract_id, price)
                     return price
         except Exception as e:
             logger.debug(f"Failed to fetch current price for {contract_id}: {e}")
@@ -568,16 +573,22 @@ class TopstepXPriceStreamer:
         self._market_ws = None  # live WebSocket for dynamic subscriptions
         self._sub_counter = 0   # invocation ID counter
 
+    def set_token(self, token: str) -> None:
+        """Update the JWT token (called by TokenManager on refresh)."""
+        self._jwt_token = token
+
     # ── Market Hub (live prices) ──────────────────────────────────
 
     async def _run_market_hub(self) -> None:
         """Connect to Market Hub and stream GatewayTrade events."""
         import websockets
 
-        url = f"wss://{self._ws_base.split('://')[-1]}/hubs/market?access_token={self._jwt_token}"
+        backoff = 2  # initial backoff in seconds
 
         while not self._stop_event.is_set():
             try:
+                # Build URL fresh each reconnect so token refreshes are picked up
+                url = f"wss://{self._ws_base.split('://')[-1]}/hubs/market?access_token={self._jwt_token}"
                 async with websockets.connect(url) as ws:
                     # Handshake
                     await ws.send(json.dumps({"protocol": "json", "version": 1}) + self.RECORD_SEPARATOR)
@@ -587,9 +598,13 @@ class TopstepXPriceStreamer:
                         await asyncio.sleep(5)
                         continue
 
-                    # Subscribe to each symbol
+                    # Subscribe only to valid contract IDs (CON.F.* format)
                     self._sub_counter = 0
-                    for symbol in list(self._symbols):
+                    valid_symbols = [s for s in self._symbols if s.startswith("CON.")]
+                    skipped = self._symbols - set(valid_symbols)
+                    if skipped:
+                        logger.warning(f"Market Hub: skipping invalid symbols: {skipped}")
+                    for symbol in valid_symbols:
                         self._sub_counter += 1
                         msg = json.dumps({
                             "type": 1,
@@ -600,13 +615,19 @@ class TopstepXPriceStreamer:
                         await ws.send(msg)
 
                     self._market_ws = ws
-                    logger.info(f"Market Hub connected — streaming {self._symbols}")
+                    logger.info(f"Market Hub connected — streaming {valid_symbols}")
+
+                    # Reset backoff on successful connection that stays open
+                    connected_at = _time.monotonic()
 
                     while not self._stop_event.is_set():
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=30)
                         except asyncio.TimeoutError:
                             continue
+
+                        # Connection survived — reset backoff
+                        backoff = 2
 
                         for chunk in raw.strip(self.RECORD_SEPARATOR).split(self.RECORD_SEPARATOR):
                             if not chunk:
@@ -617,7 +638,12 @@ class TopstepXPriceStreamer:
                             if msg_type == 1:  # Invocation — GatewayTrade
                                 self._handle_gateway_trade(msg.get("arguments", []))
                             elif msg_type == 7:  # Close
-                                logger.warning("Market Hub server closed connection")
+                                # If closed immediately, it's a server-side issue
+                                elapsed = _time.monotonic() - connected_at
+                                if elapsed < 5:
+                                    logger.warning(f"Market Hub server closed immediately ({elapsed:.1f}s) — backing off {backoff}s")
+                                else:
+                                    logger.warning("Market Hub server closed connection")
                                 raise ConnectionError("Server closed")
                             # type 3 = completion, type 6 = ping — ignore
 
@@ -627,8 +653,9 @@ class TopstepXPriceStreamer:
             except Exception as e:
                 self._market_ws = None
                 if not self._stop_event.is_set():
-                    logger.warning(f"Market Hub disconnected: {e} — reconnecting in 2s")
-                    await asyncio.sleep(2)
+                    logger.warning(f"Market Hub disconnected: {e} — reconnecting in {backoff}s")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60)  # exponential backoff, max 60s
 
     def _handle_gateway_trade(self, args: list) -> None:
         """Handle GatewayTrade event: [contractId, [trade, trade, ...]]"""
@@ -655,10 +682,11 @@ class TopstepXPriceStreamer:
             logger.warning("No account ID — skipping User Hub")
             return
 
-        url = f"wss://{self._ws_base.split('://')[-1]}/hubs/user?access_token={self._jwt_token}"
+        # URL is rebuilt inside the loop so token refreshes are picked up
 
         while not self._stop_event.is_set():
             try:
+                url = f"wss://{self._ws_base.split('://')[-1]}/hubs/user?access_token={self._jwt_token}"
                 async with websockets.connect(url) as ws:
                     await ws.send(json.dumps({"protocol": "json", "version": 1}) + self.RECORD_SEPARATOR)
                     hs = await ws.recv()
@@ -719,7 +747,13 @@ class TopstepXPriceStreamer:
             elif target == "GatewayUserPosition":
                 if self._account_client:
                     self._account_client._accounts_cache = None
-                logger.info(f"Position update: {data.get('contractId')} size={data.get('size')} avg={data.get('averagePrice')}")
+                contract_id = data.get("contractId")
+                size = data.get("size", 0)
+                logger.info(f"Position update: {contract_id} size={size} avg={data.get('averagePrice')}")
+                # Auto-subscribe to price stream for positions opened externally
+                # (e.g., via TopstepX platform) so dashboard shows live PnL
+                if contract_id and size != 0:
+                    self.subscribe(contract_id)
             elif target == "GatewayUserTrade":
                 if self._account_client:
                     self._account_client._accounts_cache = None
@@ -779,6 +813,9 @@ class TopstepXPriceStreamer:
         while not self._stop_event.is_set():
             try:
                 for symbol in list(self._symbols):
+                    # Only poll valid contract IDs (CON.F.* format)
+                    if not symbol.startswith("CON."):
+                        continue
                     if self._account_client:
                         await self._account_client._fetch_current_price(symbol)
                     if self._stop_event.is_set():

@@ -160,6 +160,14 @@ class TopstepXWebClient:
                 return acct
         return None
 
+    async def get_account_by_id(self, account_id: int) -> Optional[WebTradingAccount]:
+        """Return the account matching account_id, or None."""
+        accounts = await self.get_trading_accounts()
+        for acct in accounts:
+            if acct.account_id == account_id:
+                return acct
+        return None
+
     async def close(self):
         await self._http.aclose()
 

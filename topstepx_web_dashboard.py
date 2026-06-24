@@ -2,7 +2,8 @@
 FastAPI web dashboard for the TopstepX trading arena.
 
 Provides REST endpoints and WebSocket for live portfolio monitoring.
-Sim accounts are backed by MySQL; real practice account stats come from TopstepX API.
+Sim accounts are backed by MySQL; the promoted agent's real TopstepX account stats
+come from the TopstepX API.
 
 Usage:
     app = create_app(sim_manager, get_all_agents_state, agent_name, ...)
@@ -18,6 +19,8 @@ from typing import Callable, Optional
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+import yaml
+
 from sim_account_manager import SimAccountManager
 from topstepx_account import TopstepXAccountClient
 from topstepx_web_client import TopstepDashboardClient, TopstepXWebClient, WebTradingAccount
@@ -31,7 +34,7 @@ def create_app(
     sim_manager: SimAccountManager,
     get_all_agents_state: Optional[Callable[[], dict]] = None,
     agent_name: str = "futures-trader",
-    mirror_agent: str = "",
+    promoted_agent: str = "",
     trading_client=None,
     get_account_id: Optional[Callable[[], Optional[int]]] = None,
     set_account_id: Optional[Callable[[int], None]] = None,
@@ -44,7 +47,7 @@ def create_app(
         sim_manager: SimAccountManager instance for simulated accounts
         get_all_agents_state: Optional callable returning {agent_name: state_dict, ...}
         agent_name: Default agent name for single-agent queries
-        mirror_agent: Agent name whose trades are mirrored to TopstepX practice account;
+        promoted_agent: Agent name whose trades are mirrored to real TopstepX account;
                       only this agent's dashboard view uses TopstepX API data
         trading_client: Optional TopstepXTradingClient for real practice account
         get_account_id: Callable returning the current practice account ID
@@ -58,7 +61,7 @@ def create_app(
 
     # Cached sim portfolio snapshots per agent
     _agent_snapshots: dict[str, dict] = {}
-    # Cached real practice account data (only used for mirror_agent)
+    # Cached real TopstepX account data (only used for promoted_agent)
     _last_practice: dict = {"summary": None, "web_account": None}
     # Cached dashboard account ID
     _dash_account_id: dict = {"value": None}
@@ -95,8 +98,8 @@ def create_app(
                     except Exception as e:
                         logger.debug(f"Portfolio refresh error for {name}: {e}")
 
-                # Refresh real practice account stats (only for mirror agent)
-                if mirror_agent and trading_client and get_account_id:
+                # Refresh real TopstepX account stats (only for promoted agent)
+                if promoted_agent and trading_client and get_account_id:
                     account_id = get_account_id()
                     if account_id is not None:
                         summary = await trading_client.get_account_summary(account_id)
@@ -108,7 +111,7 @@ def create_app(
 
                     if web_client:
                         try:
-                            acct = await web_client.get_active_practice_account()
+                            acct = await web_client.get_account_by_id(account_id)
                             if acct:
                                 _last_practice["web_account"] = acct
                         except Exception as e:
@@ -124,16 +127,16 @@ def create_app(
     def _build_agent_snapshot(name: str) -> dict:
         """Build portfolio snapshot for a single agent.
 
-        For the mirror agent: uses real TopstepX practice account data exclusively
+        For the promoted agent: uses real TopstepX account data exclusively
         (balance, equity, positions, stats) when available.
         For all other agents: uses sim account data from MySQL.
         """
-        is_mirror = mirror_agent and name == mirror_agent
-        summary = _last_practice.get("summary") if is_mirror else None
-        wa: Optional[WebTradingAccount] = _last_practice.get("web_account") if is_mirror else None
+        is_promoted = promoted_agent and name == promoted_agent
+        summary = _last_practice.get("summary") if is_promoted else None
+        wa: Optional[WebTradingAccount] = _last_practice.get("web_account") if is_promoted else None
 
-        # ── Mirror agent: use real TopstepX data ──
-        if is_mirror and (summary or wa):
+        # ── Promoted agent: use real TopstepX data ──
+        if is_promoted and (summary or wa):
             # Positions + balance from trading client summary
             if summary:
                 positions = summary.get("positions", [])
@@ -201,7 +204,7 @@ def create_app(
 
             return snapshot
 
-        # ── Non-mirror agents: use sim account data ──
+        # ── Non-promoted agents: use sim account data ──
         portfolio = _agent_snapshots.get(name)
         if portfolio is None:
             return {"error": f"Loading {name}..."}
@@ -289,7 +292,7 @@ def create_app(
         return {
             "prices": prices,
             "market_open": market_open,
-            "mirror_agent": mirror_agent,
+            "promoted_agent": promoted_agent,
             "agents": agents_data,
         }
 
@@ -326,11 +329,11 @@ def create_app(
     async def api_balance_history(timeRange: str = Query(...), agent: str = Query(default="")):
         """Fetch daily balance + MLL history.
 
-        Tries Topstep dashboard API first for mirror agent; falls back to sim_daily_snapshots.
+        Tries Topstep dashboard API first for promoted agent; falls back to sim_daily_snapshots.
         """
         target = agent if agent else agent_name
-        is_mirror = mirror_agent and target == mirror_agent
-        if is_mirror and dashboard_client and get_account_id:
+        is_promoted = promoted_agent and target == promoted_agent
+        if is_promoted and dashboard_client and get_account_id:
             if _dash_account_id["value"] is None:
                 topstepx_id = get_account_id()
                 if topstepx_id is not None:
@@ -421,6 +424,92 @@ def create_app(
             except ImportError:
                 pass
         return result
+
+    # ── Eval results ───────────────────────────────────────────────
+
+    @app.post("/api/eval-result")
+    async def api_record_eval(request: Request):
+        """Manually record an eval result (pass or fail) for an agent."""
+        body = await request.json()
+        if reset_password:
+            pw = body.get("password", "")
+            if pw != reset_password:
+                return JSONResponse({"success": False, "error": "Invalid password"}, 403)
+        agent = body.get("agent_name", "")
+        passed = body.get("passed", False)
+        notes = body.get("notes", "")
+        if not agent:
+            return JSONResponse({"success": False, "error": "agent_name required"}, 400)
+        cfg = sim_manager._agent_configs.get(agent, {})
+        model_id = body.get("model_id", cfg.get("model_id", "unknown"))
+        strategy = body.get("strategy", cfg.get("strategy", "unknown"))
+        result = await sim_manager.record_eval_result(
+            agent_name=agent,
+            model_id=model_id,
+            strategy=strategy,
+            passed=passed,
+            notes=notes,
+        )
+        return result
+
+    @app.get("/api/eval-results")
+    async def api_get_eval_results(agent: str = Query(default="")):
+        """Get eval results, optionally filtered by agent."""
+        rows = await sim_manager.get_eval_results(agent or None)
+        # Convert datetime objects for JSON serialization
+        for row in rows:
+            if row.get("recorded_at"):
+                row["recorded_at"] = row["recorded_at"].isoformat()
+        return rows
+
+    @app.get("/api/strategies")
+    async def api_get_strategies():
+        """Return available strategy names from deploy_router_node.py."""
+        try:
+            from deploy_router_node import STRATEGIES
+            return list(STRATEGIES.keys())
+        except ImportError:
+            return ["default", "momentum", "brainrot", "scalper", "futures"]
+
+    @app.post("/api/update-strategy")
+    async def api_update_strategy(request: Request):
+        """Update an agent's strategy in agents.yml. Requires restart to take effect."""
+        body = await request.json()
+        if reset_password:
+            pw = body.get("password", "")
+            if pw != reset_password:
+                return JSONResponse({"success": False, "error": "Invalid password"}, 403)
+        agent = body.get("agent_name", "")
+        new_strategy = body.get("strategy", "")
+        if not agent or not new_strategy:
+            return JSONResponse({"success": False, "error": "agent_name and strategy required"}, 400)
+
+        agents_yml = Path(__file__).parent / "agents.yml"
+        try:
+            with open(agents_yml) as f:
+                config = yaml.safe_load(f)
+            if agent not in config.get("agents", {}):
+                return JSONResponse({"success": False, "error": f"Agent '{agent}' not in agents.yml"}, 404)
+            old_strategy = config["agents"][agent].get("strategy", "")
+            config["agents"][agent]["strategy"] = new_strategy
+            with open(agents_yml, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            # Update in-memory state
+            cfg = sim_manager._agent_configs.get(agent, {})
+            if cfg:
+                cfg["strategy"] = new_strategy
+            # Update dashboard agent state so header reflects the change
+            try:
+                from topstepx_trading_tools import _get_agent_state
+                state = _get_agent_state(agent)
+                state["strategy"] = new_strategy
+            except ImportError:
+                pass
+            logger.info(f"Strategy updated: {agent} {old_strategy} -> {new_strategy}")
+            return {"success": True, "old_strategy": old_strategy, "new_strategy": new_strategy}
+        except Exception as e:
+            logger.exception("Failed to update agents.yml")
+            return JSONResponse({"success": False, "error": str(e)}, 500)
 
     # ── WebSocket ─────────────────────────────────────────────────
 

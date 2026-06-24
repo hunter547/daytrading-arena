@@ -25,6 +25,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_STARTING_BALANCE = 150_000.0
 DEFAULT_DRAWDOWN_LIMIT = 4_500.0
 
+# ── Evaluation rules by account size ──────────────────────────────
+# Maps starting_balance -> (daily_profit_limit, profit_goal)
+# 50% consistency rule: no single day can exceed 50% of profit_goal
+EVAL_RULES: dict[float, tuple[float, float]] = {
+    50_000.0:  (1_500.0,  3_000.0),
+    100_000.0: (3_000.0,  6_000.0),
+    150_000.0: (4_500.0,  9_000.0),
+}
+
+def get_eval_rules(starting_balance: float) -> tuple[float, float]:
+    """Return (daily_profit_limit, profit_goal) for a given account size.
+
+    Falls back to proportional scaling if the exact size isn't in the table.
+    """
+    rules = EVAL_RULES.get(starting_balance)
+    if rules:
+        return rules
+    # Scale proportionally from 150K baseline
+    ratio = starting_balance / 150_000.0
+    return (4_500.0 * ratio, 9_000.0 * ratio)
+
 # ── Contract group mapping ────────────────────────────────────────
 # Maps symbol_id (from API) to (contract_group, is_micro, micro_equivalent)
 # symbol_id is the middle portion of contract_id, e.g. "F.US.MES" from "CON.F.US.MES.H26"
@@ -182,6 +203,25 @@ CREATE TABLE IF NOT EXISTS sim_daily_snapshots (
     FOREIGN KEY (account_id) REFERENCES sim_accounts(id)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS eval_results (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    agent_name       VARCHAR(128) NOT NULL,
+    model_id         VARCHAR(128) NOT NULL,
+    strategy         VARCHAR(64) NOT NULL,
+    account_size     DOUBLE NOT NULL,
+    profit_goal      DOUBLE NOT NULL,
+    final_balance    DOUBLE NOT NULL,
+    total_pnl        DOUBLE NOT NULL,
+    total_trades     INT NOT NULL DEFAULT 0,
+    winning_trades   INT NOT NULL DEFAULT 0,
+    losing_trades    INT NOT NULL DEFAULT 0,
+    passed           TINYINT(1) NOT NULL DEFAULT 0,
+    recorded_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notes            VARCHAR(512),
+    INDEX idx_agent (agent_name),
+    INDEX idx_passed (passed)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS sim_contracts (
     id               BIGINT AUTO_INCREMENT PRIMARY KEY,
     contract_id      VARCHAR(64) NOT NULL UNIQUE,
@@ -215,6 +255,12 @@ class SimAccountManager:
         self._contract_cache: dict[str, dict] = {}  # contract_id -> row dict
         self._contract_cache_ts: float = 0.0
         self._contract_cache_ttl: float = 300.0  # 5 min
+        # Agent config cache: agent_name -> {"model_id": ..., "strategy": ...}
+        self._agent_configs: dict[str, dict] = {}
+
+    def register_agent_config(self, agent_name: str, model_id: str, strategy: str) -> None:
+        """Register an agent's model/strategy so eval results can reference them."""
+        self._agent_configs[agent_name] = {"model_id": model_id, "strategy": strategy}
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -1126,6 +1172,68 @@ class SimAccountManager:
         logger.info(f"Account RESET: {agent_name} -> ${starting:,.2f}")
         return {"success": True, "balance": starting, "agent_name": agent_name}
 
+    # ── Eval results ──────────────────────────────────────────────
+
+    async def record_eval_result(
+        self,
+        agent_name: str,
+        model_id: str,
+        strategy: str,
+        passed: bool,
+        notes: str = "",
+    ) -> dict:
+        """Record an evaluation result (pass or fail) for an agent.
+
+        Captures the agent's current account stats before they get reset.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                acct = await self._get_account_row(cur, agent_name)
+                if acct is None:
+                    return {"success": False, "error": f"Account '{agent_name}' not found"}
+
+                starting = acct["starting_balance"]
+                _, profit_goal = get_eval_rules(starting)
+                total_pnl = acct["total_realized_pnl"]
+
+                await cur.execute(
+                    """INSERT INTO eval_results
+                       (agent_name, model_id, strategy, account_size,
+                        profit_goal, final_balance, total_pnl,
+                        total_trades, winning_trades, losing_trades,
+                        passed, notes)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (agent_name, model_id, strategy, starting,
+                     profit_goal, acct["balance"], total_pnl,
+                     acct["total_trades"], acct["winning_trades"],
+                     acct["losing_trades"], passed, notes or None),
+                )
+                eval_id = cur.lastrowid
+            await conn.commit()
+
+        status = "PASSED" if passed else "FAILED"
+        logger.info(
+            f"Eval {status}: {agent_name} ({model_id}) | "
+            f"Balance ${acct['balance']:,.2f} | PnL ${total_pnl:,.2f}"
+        )
+        return {"success": True, "eval_id": eval_id, "passed": passed}
+
+    async def get_eval_results(self, agent_name: str | None = None) -> list[dict]:
+        """Fetch eval results, optionally filtered by agent name."""
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                if agent_name:
+                    await cur.execute(
+                        "SELECT * FROM eval_results WHERE agent_name=%s ORDER BY recorded_at DESC",
+                        (agent_name,),
+                    )
+                else:
+                    await cur.execute(
+                        "SELECT * FROM eval_results ORDER BY recorded_at DESC"
+                    )
+                rows = await cur.fetchall()
+        return list(rows)
+
     async def daily_snapshot(self, agent_name: str) -> None:
         """Write a point-in-time snapshot to sim_daily_snapshots for equity curve tracking.
 
@@ -1369,6 +1477,20 @@ class SimAccountManager:
                             f"Equity ${equity:,.2f} < MLL ${mll_floor:,.2f} | "
                             f"New balance: ${new_balance:,.2f}"
                         )
+
+                        # Auto-record failed eval result
+                        cfg = self._agent_configs.get(acct["agent_name"], {})
+                        if cfg:
+                            try:
+                                await self.record_eval_result(
+                                    agent_name=acct["agent_name"],
+                                    model_id=cfg["model_id"],
+                                    strategy=cfg["strategy"],
+                                    passed=False,
+                                    notes=f"MLL breach: equity ${equity:,.2f} < floor ${mll_floor:,.2f}",
+                                )
+                            except Exception:
+                                logger.exception("Failed to record eval result for blown account")
                     else:
                         # No breach — just update high water mark (not MLL)
                         if new_highest != acct["highest_unrealized_balance"]:

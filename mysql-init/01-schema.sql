@@ -86,3 +86,22 @@ CREATE TABLE IF NOT EXISTS sim_daily_snapshots (
     UNIQUE KEY uq_account_date (account_id, trade_date),
     FOREIGN KEY (account_id) REFERENCES sim_accounts(id)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS eval_results (
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    agent_name       VARCHAR(128) NOT NULL,
+    model_id         VARCHAR(128) NOT NULL,
+    strategy         VARCHAR(64) NOT NULL,
+    account_size     DOUBLE NOT NULL,
+    profit_goal      DOUBLE NOT NULL,
+    final_balance    DOUBLE NOT NULL,
+    total_pnl        DOUBLE NOT NULL,
+    total_trades     INT NOT NULL DEFAULT 0,
+    winning_trades   INT NOT NULL DEFAULT 0,
+    losing_trades    INT NOT NULL DEFAULT 0,
+    passed           TINYINT(1) NOT NULL DEFAULT 0,
+    recorded_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notes            VARCHAR(512),
+    INDEX idx_agent (agent_name),
+    INDEX idx_passed (passed)
+) ENGINE=InnoDB;
