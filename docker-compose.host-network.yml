@@ -126,13 +126,16 @@ services:
       - AGENT_MODEL=gpt-5-nano
       - AGENT_STRATEGY=futures
       - TOPSTEP_REFRESH_TOKEN=${TOPSTEP_REFRESH_TOKEN:-}
-      - MIRROR_AGENT=${MIRROR_AGENT:-}
+      - PROMOTED_AGENT=${PROMOTED_AGENT:-${MIRROR_AGENT:-}}
+      - TOPSTEPX_ACCOUNT_ID=${TOPSTEPX_ACCOUNT_ID:-}
+      - RESET_PASSWORD=${RESET_PASSWORD:-}
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers localhost:9092
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
+      - ./agents.yml:/app/agents.yml
 
   # 5. Tools & Dashboard (Crypto - optional)
   dashboard:
@@ -179,6 +182,9 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - TOPSTEPX_USERNAME=${TOPSTEPX_USERNAME:-}
+      - TOPSTEPX_API_KEY=${TOPSTEPX_API_KEY:-}
+      - TOPSTEPX_ACCOUNT_ID=${TOPSTEPX_ACCOUNT_ID:-}
       - SERVICE_NAME=agent_launcher
     command: >
       python agent_launcher.py

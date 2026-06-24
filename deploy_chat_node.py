@@ -25,6 +25,8 @@ from calfkit.nodes.chat_node import ChatNode
 from calfkit.providers.pydantic_ai.openai import OpenAIModelClient
 from calfkit.runners.service import NodesService
 
+from conflation_middleware import conflate_stale_prompts
+
 load_dotenv()
 
 
@@ -98,7 +100,14 @@ async def main() -> None:
 
     chat_node = ChatNode(model_client, name=args.name)
     service = NodesService(broker)
-    service.register_node(chat_node, max_workers=args.max_workers)
+    # Conflating queue: only ever run inference on the freshest prompt per
+    # partition; stale superseded prompts are acked and dropped. Prevents the
+    # backlog-induced stale-reasoning problem and self-drains any existing lag.
+    service.register_node(
+        chat_node,
+        max_workers=args.max_workers,
+        extra_subscribe_kwargs={"middlewares": [conflate_stale_prompts]},
+    )
 
     print(f"  - Name:  {args.name}")
     print(f"  - Model: {args.model_id}")

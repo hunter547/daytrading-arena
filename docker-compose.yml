@@ -138,7 +138,9 @@ services:
       - AGENT_MODEL=gpt-5-nano
       - AGENT_STRATEGY=futures
       - TOPSTEP_REFRESH_TOKEN=${TOPSTEP_REFRESH_TOKEN:-}
-      - MIRROR_AGENT=${MIRROR_AGENT:-}
+      - PROMOTED_AGENT=${PROMOTED_AGENT:-${MIRROR_AGENT:-}}
+      - TOPSTEPX_ACCOUNT_ID=${TOPSTEPX_ACCOUNT_ID:-}
+      - RESET_PASSWORD=${RESET_PASSWORD:-}
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers kafka:9092

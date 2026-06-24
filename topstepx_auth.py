@@ -3,12 +3,18 @@ TopstepX authentication helper.
 
 This module helps you authenticate with TopstepX using your API key
 and obtain a JWT token for use with the adapters.
+
+TopstepXTokenManager provides automatic token lifecycle management:
+- Fetches a fresh JWT on startup
+- Proactively refreshes before expiry (every 20 hours; tokens last 24h)
+- Updates all registered HTTP clients when the token changes
 """
 
 import asyncio
 import logging
 import os
-from typing import Optional
+import time as _time
+from typing import Callable, Optional
 
 import httpx
 
@@ -137,6 +143,126 @@ class TopstepXAuth:
     async def close(self):
         """Close HTTP client."""
         await self._http_client.aclose()
+
+
+class TopstepXTokenManager:
+    """Manages JWT token lifecycle: fetch on startup, auto-refresh before expiry.
+
+    Registered HTTP clients (httpx.AsyncClient) have their Authorization
+    headers updated automatically when the token refreshes.
+    """
+
+    REFRESH_INTERVAL = 20 * 3600  # 20 hours (tokens last ~24h)
+
+    def __init__(
+        self,
+        username: str,
+        api_key: str,
+        environment: str = "demo",
+        api_base_url: Optional[str] = None,
+    ):
+        self._username = username
+        self._api_key = api_key
+        self._environment = environment
+        self._api_base_url = api_base_url
+        self._token: Optional[str] = None
+        self._token_time: float = 0.0
+        self._http_clients: list[httpx.AsyncClient] = []
+        self._ws_token_setters: list[Callable[[str], None]] = []
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._auth = TopstepXAuth(environment=environment, api_base_url=api_base_url)
+
+    @property
+    def token(self) -> Optional[str]:
+        return self._token
+
+    def register_http_client(self, client: httpx.AsyncClient) -> None:
+        """Register an httpx client whose Authorization header will be updated on refresh."""
+        self._http_clients.append(client)
+
+    def register_ws_token_setter(self, setter: Callable[[str], None]) -> None:
+        """Register a callable that receives the new token (e.g., for WebSocket URL updates)."""
+        self._ws_token_setters.append(setter)
+
+    async def authenticate(self) -> Optional[str]:
+        """Fetch a fresh JWT token. Returns the token or None on failure."""
+        token = await self._auth.login_with_api_key(self._username, self._api_key)
+        if token:
+            self._apply_token(token)
+        return token
+
+    def _apply_token(self, token: str) -> None:
+        """Push the new token to all registered consumers."""
+        self._token = token
+        self._token_time = _time.monotonic()
+        os.environ["TOPSTEPX_JWT_TOKEN"] = token
+
+        for client in self._http_clients:
+            client.headers["Authorization"] = f"Bearer {token}"
+        for setter in self._ws_token_setters:
+            try:
+                setter(token)
+            except Exception as e:
+                logger.warning(f"Failed to update WS token: {e}")
+
+        logger.info("JWT token refreshed and pushed to all clients")
+
+    async def start(self) -> Optional[str]:
+        """Authenticate immediately and start the background refresh loop.
+
+        Returns the initial token or None if authentication failed.
+        """
+        token = await self.authenticate()
+        if token:
+            self._refresh_task = asyncio.create_task(self._refresh_loop())
+        return token
+
+    async def _refresh_loop(self) -> None:
+        """Proactively refresh the token before it expires."""
+        while True:
+            await asyncio.sleep(self.REFRESH_INTERVAL)
+            logger.info("Proactive JWT token refresh...")
+            try:
+                token = await self._auth.login_with_api_key(self._username, self._api_key)
+                if token:
+                    self._apply_token(token)
+                else:
+                    logger.error("Proactive token refresh failed — will retry next cycle")
+            except Exception as e:
+                logger.error(f"Token refresh error: {e}")
+
+    async def handle_401(self) -> Optional[str]:
+        """Called when a 401 is detected. Refreshes the token immediately.
+
+        Returns the new token, or None if refresh failed.
+        """
+        # Avoid thundering herd: if we refreshed very recently, don't do it again
+        if _time.monotonic() - self._token_time < 30:
+            return self._token
+        logger.warning("401 detected — refreshing JWT token...")
+        return await self.authenticate()
+
+    async def close(self) -> None:
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
+        await self._auth.close()
+
+
+# Module-level singleton so all components can trigger refresh
+_token_manager: Optional[TopstepXTokenManager] = None
+
+
+def get_token_manager() -> Optional[TopstepXTokenManager]:
+    return _token_manager
+
+
+def set_token_manager(manager: TopstepXTokenManager) -> None:
+    global _token_manager
+    _token_manager = manager
 
 
 async def authenticate_topstepx(

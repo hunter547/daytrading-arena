@@ -15,7 +15,7 @@ models:
     # max_workers: 1
 
   step-3.5-flash:
-    model_id: stepfun/step-3.5-flash:free
+    model_id: stepfun/step-3.5-flash
     api_key_env: OPENROUTER_API_KEY
     base_url: https://openrouter.ai/api/v1
     logo: stepfun
@@ -33,23 +33,28 @@ models:
     logo: nousresearch
 
   trinity-large-preview:
-    model_id: arcee-ai/trinity-large-preview:free
+    model_id: nvidia/nemotron-3-super-120b-a12b:free
     api_key_env: OPENROUTER_API_KEY
     base_url: https://openrouter.ai/api/v1
-    logo: arcee
+    logo: nvidia
 
-  mistral-small:
-    model_id: mistralai/mistral-small-3.1-24b-instruct:free
+  hunter-alpha:
+    model_id: xiaomi/mimo-v2.5-pro
     api_key_env: OPENROUTER_API_KEY
     base_url: https://openrouter.ai/api/v1
-    logo: mistral
+    logo: openrouter
 
   glm-4.5-air:
-    model_id: z-ai/glm-4.5-air:free
+    model_id: z-ai/glm-4.5-air
     api_key_env: OPENROUTER_API_KEY
     base_url: https://openrouter.ai/api/v1
     logo: zhipu
 
+  healer-alpha:
+    model_id: xiaomi/mimo-v2.5
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    logo: openrouter
 
   # claude-sonnet:
   #   model_id: anthropic/claude-sonnet-4-6
@@ -57,22 +62,28 @@ models:
   #   base_url: https://openrouter.ai/api/v1
 
 agents:
-  gpt-trader:
-    model: gpt-5-nano
-    strategy: futures
-
-  stepfun-trader:
-    model: step-3.5-flash
-    strategy: futures
-
-  mistral-trader:
-    model: mistral-small
-    strategy: momentum
-
-  zhipu-trader:
-    model: glm-4.5-air
+  # Only hunter-trader runs (promoted to the real combine account).
+  # Other agents are commented out to save tokens — re-enable as needed.
+  hunter-trader:
+    model: hunter-alpha
     strategy: brainrot
 
-  trinity-scalper:
-    model: trinity-large-preview
-    strategy: scalper
+  # zhipu-trader:
+  #   model: glm-4.5-air
+  #   strategy: momentum
+
+  # gpt-trader:
+  #   model: gpt-5-nano
+  #   strategy: futures
+
+  # stepfun-trader:
+  #   model: step-3.5-flash
+  #   strategy: futures
+
+  # trinity-fvg:
+  #   model: trinity-large-preview
+  #   strategy: fvg
+
+  # healer-trader:
+  #   model: healer-alpha
+  #   strategy: fvg
