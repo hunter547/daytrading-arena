@@ -40,6 +40,8 @@ def create_app(
     set_account_id: Optional[Callable[[int], None]] = None,
     web_client: Optional[TopstepXWebClient] = None,
     dashboard_client: Optional[TopstepDashboardClient] = None,
+    ninjatrader_copytrader=None,
+    copy_agent: str = "",
 ) -> FastAPI:
     """Create FastAPI app backed by SimAccountManager + optional TopstepX API.
 
@@ -54,6 +56,9 @@ def create_app(
         set_account_id: Callable to update the practice account ID
         web_client: Optional TopstepXWebClient for richer practice account data
         dashboard_client: Optional TopstepDashboardClient for balance history
+        ninjatrader_copytrader: Optional NinjaTraderCopyTrader whose account is
+                      shown as a "copied account" sub-panel under the copy agent
+        copy_agent: Agent name whose trades are copy-traded to NinjaTrader
     """
     app = FastAPI(title="TopstepX Agent Arena", docs_url=None, redoc_url=None)
 
@@ -63,6 +68,8 @@ def create_app(
     _agent_snapshots: dict[str, dict] = {}
     # Cached real TopstepX account data (only used for promoted_agent)
     _last_practice: dict = {"summary": None, "web_account": None}
+    # Cached NinjaTrader copy-account snapshot (only used for copy_agent)
+    _last_copy: dict = {"summary": None}
     # Cached dashboard account ID
     _dash_account_id: dict = {"value": None}
 
@@ -116,6 +123,17 @@ def create_app(
                                 _last_practice["web_account"] = acct
                         except Exception as e:
                             logger.debug(f"Web client refresh error: {e}")
+
+                # Refresh NinjaTrader copy-account snapshot
+                if ninjatrader_copytrader is not None:
+                    try:
+                        copy_summary = await ninjatrader_copytrader.get_account_summary()
+                        if "error" not in copy_summary:
+                            _last_copy["summary"] = copy_summary
+                        else:
+                            logger.debug(f"Copy account refresh: {copy_summary['error']}")
+                    except Exception as e:
+                        logger.debug(f"Copy account refresh error: {e}")
             except Exception as e:
                 logger.error(f"Background refresh error: {e}")
             await asyncio.sleep(5)
@@ -262,6 +280,34 @@ def create_app(
 
         return snapshot
 
+    def _build_copy_snapshot() -> Optional[dict]:
+        """Build the NinjaTrader copy-account snapshot for the dashboard.
+
+        Returns None when copy trading isn't configured or no data yet.
+        """
+        if ninjatrader_copytrader is None:
+            return None
+        summary = _last_copy.get("summary")
+        if not summary:
+            return {
+                "account": getattr(ninjatrader_copytrader, "account", ""),
+                "loading": True,
+            }
+        return {
+            "account": summary.get("account", ""),
+            "balance": summary.get("balance", 0),
+            "equity": summary.get("equity", 0),
+            "unrealizedPnL": summary.get("unrealizedPnL", 0),
+            "realizedDayPnl": summary.get("realizedDayPnl", 0),
+            "winRate": summary.get("winRate", 0),
+            "totalTrades": summary.get("totalTrades", 0),
+            "totalProfit": summary.get("totalProfit", 0),
+            "totalLoss": summary.get("totalLoss", 0),
+            "positions": summary.get("positions", []),
+            "connection": summary.get("connection", ""),
+            "status": summary.get("status", ""),
+        }
+
     def _build_ws_data() -> dict:
         """Build the full WebSocket payload with per-agent data."""
         from unified_market_connector import _is_market_open
@@ -269,6 +315,7 @@ def create_app(
         prices = dict(TopstepXAccountClient._current_prices)
         market_open = _is_market_open()
         agent_states = get_all_agents_state() if get_all_agents_state else {}
+        copy_snapshot = _build_copy_snapshot()
 
         agents_data = {}
         for name in _get_agent_names():
@@ -287,12 +334,16 @@ def create_app(
                 "latest_reasoning": state.get("latest_reasoning"),
                 "activity": state.get("activity", []),
             })
+            # Attach the NinjaTrader copy-account view to the copy agent's panel
+            if copy_agent and name == copy_agent and copy_snapshot is not None:
+                snapshot["copyAccount"] = copy_snapshot
             agents_data[name] = snapshot
 
         return {
             "prices": prices,
             "market_open": market_open,
             "promoted_agent": promoted_agent,
+            "copy_agent": copy_agent,
             "agents": agents_data,
         }
 
@@ -403,6 +454,14 @@ def create_app(
         """Get all active tradeable contracts."""
         contracts = await sim_manager.get_active_contracts()
         return contracts
+
+    @app.get("/api/copy-account")
+    async def api_copy_account():
+        """Get the NinjaTrader copy-account snapshot (mirrored from the copy agent)."""
+        snapshot = _build_copy_snapshot()
+        if snapshot is None:
+            return {"enabled": False}
+        return {"enabled": True, "copy_agent": copy_agent, **snapshot}
 
     @app.post("/api/reset-account")
     async def api_reset_account(request: Request, agent: str = Query(default="")):

@@ -109,6 +109,31 @@
   @keyframes pulse-live { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
   .badge-blown { background: rgba(248,81,73,0.2); color: var(--red); border: 1px solid var(--red); animation: pulse-blown 2s infinite; }
   @keyframes pulse-blown { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+  .badge-copy { background: rgba(88,166,255,0.18); color: var(--blue); border: 1px solid var(--blue); font-weight: 700; }
+
+  /* NinjaTrader copy-account sub-panel */
+  .copy-account {
+    border: 1px solid var(--blue);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 8px 0 12px;
+    background: rgba(88,166,255,0.05);
+  }
+  .copy-account .copy-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--blue);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .copy-account .copy-header .copy-acct { color: var(--text-dim); font-weight: 600; text-transform: none; letter-spacing: 0; }
+  .copy-account .copy-status { margin-left: auto; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 3px; }
+  .copy-account .copy-status.connected { color: var(--green); border: 1px solid var(--green); }
+  .copy-account .copy-status.disconnected { color: var(--red); border: 1px solid var(--red); }
 
   /* Stat cards within agent */
   .stat-cards {
@@ -364,6 +389,7 @@ const fmt = (n, decimals=2) => {
 
 let currentPrices = {};
 let promotedAgent = '';
+let copyAgent = '';
 let availableStrategies = [];
 
 // Fetch available strategies on load
@@ -437,6 +463,7 @@ function connectWS() {
       const data = JSON.parse(e.data);
       if (data.prices) currentPrices = data.prices;
       if (data.promoted_agent !== undefined) promotedAgent = data.promoted_agent;
+      if (data.copy_agent !== undefined) copyAgent = data.copy_agent;
 
       // Market badge
       const mb = $('marketBadge');
@@ -635,6 +662,70 @@ function renderAgentPanel(panel, name, agent) {
     }).join('');
   }
 
+  // NinjaTrader copy-account sub-panel (mirrored trades on a real account)
+  let copyHtml = '';
+  const ca = agent.copyAccount;
+  if (ca) {
+    const isConn = (ca.status || '').toLowerCase() === 'connected';
+    const statusCls = isConn ? 'connected' : 'disconnected';
+    const statusTxt = ca.status || (ca.loading ? 'Loading' : 'Unknown');
+    let copyBody;
+    if (ca.loading) {
+      copyBody = '<div class="no-positions-msg">Connecting to NinjaTrader bridge...</div>';
+    } else {
+      const cEquity = ca.equity || 0;
+      const cBalance = ca.balance || 0;
+      const cUnreal = ca.unrealizedPnL || 0;
+      const cDay = ca.realizedDayPnl || 0;
+      const cWr = ca.winRate || 0;
+      const cTrades = ca.totalTrades || 0;
+      const cPositions = ca.positions || [];
+      let cPosHtml;
+      if (cPositions.length === 0) {
+        cPosHtml = '<div class="no-positions-msg">No open positions</div>';
+      } else {
+        cPosHtml = cPositions.map(p => {
+          const qty = p.quantity;
+          const side = qty > 0 ? 'LONG' : 'SHORT';
+          const sideColor = qty > 0 ? 'var(--green)' : 'var(--red)';
+          const pnl = p.unrealizedPnL || 0;
+          const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+          return '<div class="pos-row">' +
+            '<span class="symbol">' + escapeHtml(p.symbol) + '</span>' +
+            '<span class="side" style="color:' + sideColor + '">' + side + ' ' + Math.abs(qty) + '</span>' +
+            '<span class="detail">Avg $' + fmt(p.avgPrice) + '</span>' +
+            '<span class="pnl" style="color:' + pnlColor + '">' + (pnl >= 0 ? '+' : '') + '$' + fmt(pnl) + '</span>' +
+            '</div>';
+        }).join('');
+      }
+      copyBody =
+        '<div class="stat-cards">' +
+          '<div class="stat-card"><div class="label">Equity</div>' +
+            '<div class="value">$' + fmt(cEquity) + '</div>' +
+            '<div class="sub">Bal $' + fmt(cBalance) + '</div></div>' +
+          '<div class="stat-card"><div class="label">Unrealized P&L</div>' +
+            '<div class="value ' + (cUnreal >= 0 ? 'positive' : 'negative') + '">' +
+            (cUnreal >= 0 ? '+' : '') + '$' + fmt(cUnreal) + '</div>' +
+            '<div class="sub">' + cPositions.length + ' position(s)</div></div>' +
+          '<div class="stat-card"><div class="label">Day P&L</div>' +
+            '<div class="value ' + (cDay >= 0 ? 'positive' : 'negative') + '">' +
+            (cDay >= 0 ? '+' : '') + '$' + fmt(cDay) + '</div></div>' +
+          '<div class="stat-card"><div class="label">Win Rate</div>' +
+            '<div class="value">' + (cWr * 100).toFixed(1) + '%</div>' +
+            '<div class="sub">' + cTrades + ' trades</div></div>' +
+        '</div>' +
+        '<div class="agent-positions"><div class="section-label">Copied Positions</div>' + cPosHtml + '</div>';
+    }
+    copyHtml =
+      '<div class="copy-account">' +
+        '<div class="copy-header">Copied Account' +
+          '<span class="copy-acct">NinjaTrader ' + escapeHtml(ca.account || '') + '</span>' +
+          '<span class="copy-status ' + statusCls + '">' + escapeHtml(statusTxt) + '</span>' +
+        '</div>' +
+        copyBody +
+      '</div>';
+  }
+
   const bodyId = panel.id + '-body';
   const existingBody = document.getElementById(bodyId);
   const isExpanded = existingBody ? !existingBody.classList.contains('collapsed') : false;
@@ -648,6 +739,7 @@ function renderAgentPanel(panel, name, agent) {
       (isBlown ? '<span class="badge badge-blown">BLOWN</span>' : '') +
       (isPromoted ? '<span class="badge badge-live">LIVE</span>' : '') +
       (isMirror ? '<span class="badge badge-mirror"><span>' + escapeHtml((agent.practiceAccount && agent.practiceAccount.name) || 'TopstepX') + '</span></span>' : '') +
+      (agent.copyAccount ? '<span class="badge badge-copy">COPY → ' + escapeHtml(agent.copyAccount.account || 'NT') + '</span>' : '') +
       '<span class="agent-dash-meta">Agent: ' + escapeHtml(name) + '</span>' +
       (agent.strategy ? '<span class="agent-dash-meta">Strategy: ' + escapeHtml(agent.strategy) + '</span>' : '') +
       '<span class="agent-dash-meta">' + lastActive + '</span>' +
@@ -691,6 +783,7 @@ function renderAgentPanel(panel, name, agent) {
           '<div class="sub">' + totalTrades + ' trades</div>' +
         '</div>' +
       '</div>' +
+      copyHtml +
       '<div class="agent-positions">' +
         '<div class="section-label">Open Positions</div>' +
         posHtml +

@@ -201,6 +201,8 @@ _trading_client: Optional[TopstepXTradingClient] = None
 _live_account_id: Optional[int] = None  # TopstepX account (practice, combine, or funded)
 _price_streamer: Optional[TopstepXPriceStreamer] = None
 _promoted_agent: str = ""  # Agent name whose trades mirror to the live TopstepX account
+_nt_copytrader = None      # NinjaTraderCopyTrader — mirrors copy agent's trades to NinjaTrader
+_nt_copy_agent: str = ""   # Agent name whose trades are copy-traded to NinjaTrader
 
 
 def _init_client():
@@ -294,6 +296,55 @@ async def _mirror_to_live(action: str, contract: str, quantity: int, agent_name:
             "ts": datetime.now().isoformat(),
             "type": "LIVE_ORDER_FAIL",
             "msg": f"LIVE {action} ERROR: {contract} — {e}",
+        })
+        result = {"success": False, "error": str(e)}
+
+    return result
+
+
+async def _mirror_to_ninjatrader(action: str, contract: str, quantity: int, agent_name: str) -> dict:
+    """Copy a simulated trade to the real NinjaTrader account via the bridge.
+
+    Called only for the copy agent. Returns the adapter result dict. Failures are
+    logged and recorded in the agent's activity feed but never block the sim trade.
+    """
+    if _nt_copytrader is None:
+        return {"success": False, "error": "No NinjaTrader copy-trader"}
+
+    result = {}
+    try:
+        if action == "BUY":
+            result = await _nt_copytrader.mirror_buy(contract, quantity)
+        elif action == "SELL":
+            result = await _nt_copytrader.mirror_sell(contract, quantity)
+        elif action == "CLOSE":
+            result = await _nt_copytrader.mirror_close(contract, quantity)
+
+        instrument = result.get("instrument", contract)
+        if result.get("success"):
+            logger.info(f"NT COPY -> {_nt_copytrader.account}: {action} {quantity}x {instrument}")
+            activity = _get_agent_activity(agent_name)
+            activity.append({
+                "ts": datetime.now().isoformat(),
+                "type": "NT_ORDER",
+                "msg": f"COPY {action} {quantity}x {instrument} — sent to NinjaTrader {_nt_copytrader.account}",
+            })
+        else:
+            error = result.get("error", "Unknown error")
+            logger.error(f"NT COPY FAILED: {action} {quantity}x {contract} — {error}")
+            activity = _get_agent_activity(agent_name)
+            activity.append({
+                "ts": datetime.now().isoformat(),
+                "type": "NT_ORDER_FAIL",
+                "msg": f"COPY {action} FAILED: {contract} — {error}",
+            })
+    except Exception as e:
+        logger.error(f"NT COPY ERROR: {action} {quantity}x {contract} — {e}")
+        activity = _get_agent_activity(agent_name)
+        activity.append({
+            "ts": datetime.now().isoformat(),
+            "type": "NT_ORDER_FAIL",
+            "msg": f"COPY {action} ERROR: {contract} — {e}",
         })
         result = {"success": False, "error": str(e)}
 
@@ -721,6 +772,13 @@ async def topstepx_buy(
                 live_line = f"\n  LIVE: Mirrored to TopstepX account {_live_account_id}"
             else:
                 live_line = f"\n  LIVE MIRROR FAILED: {live_result.get('error', 'Unknown')}"
+        nt_line = ""
+        if _nt_copytrader and _nt_copy_agent and agent_name == _nt_copy_agent:
+            nt_result = await _mirror_to_ninjatrader("BUY", contract, quantity, agent_name)
+            if nt_result.get("success"):
+                nt_line = f"\n  COPY: Sent to NinjaTrader account {_nt_copytrader.account}"
+            else:
+                nt_line = f"\n  COPY FAILED: {nt_result.get('error', 'Unknown')}"
         return (
             f"✓ BUY order filled\n"
             f"  Contract: {contract}\n"
@@ -729,6 +787,7 @@ async def topstepx_buy(
             f"  Commission: ${fee:,.2f}\n"
             f"  Account: {agent_name}"
             + live_line
+            + nt_line
         )
     else:
         error = result.get("error", "Unknown error")
@@ -786,6 +845,13 @@ async def topstepx_sell(
                 live_line = f"\n  LIVE: Mirrored to TopstepX account {_live_account_id}"
             else:
                 live_line = f"\n  LIVE MIRROR FAILED: {live_result.get('error', 'Unknown')}"
+        nt_line = ""
+        if _nt_copytrader and _nt_copy_agent and agent_name == _nt_copy_agent:
+            nt_result = await _mirror_to_ninjatrader("SELL", contract, quantity, agent_name)
+            if nt_result.get("success"):
+                nt_line = f"\n  COPY: Sent to NinjaTrader account {_nt_copytrader.account}"
+            else:
+                nt_line = f"\n  COPY FAILED: {nt_result.get('error', 'Unknown')}"
         return (
             f"✓ SELL order filled\n"
             f"  Contract: {contract}\n"
@@ -794,6 +860,7 @@ async def topstepx_sell(
             f"  Commission: ${fee:,.2f}\n"
             f"  Account: {agent_name}"
             + live_line
+            + nt_line
         )
     else:
         error = result.get("error", "Unknown error")
@@ -846,6 +913,13 @@ async def topstepx_close(
                 live_line = f"  LIVE: Mirrored close to TopstepX account {_live_account_id}"
             else:
                 live_line = f"  LIVE MIRROR FAILED: {live_result.get('error', 'Unknown')}"
+        nt_line = ""
+        if _nt_copytrader and _nt_copy_agent and agent_name == _nt_copy_agent:
+            nt_result = await _mirror_to_ninjatrader("CLOSE", contract, quantity, agent_name)
+            if nt_result.get("success"):
+                nt_line = f"  COPY: Closed on NinjaTrader account {_nt_copytrader.account}"
+            else:
+                nt_line = f"  COPY FAILED: {nt_result.get('error', 'Unknown')}"
         fee = result.get("fee", 0)
         lines = [
             f"✓ Position CLOSED",
@@ -858,6 +932,8 @@ async def topstepx_close(
         ]
         if live_line:
             lines.append(live_line)
+        if nt_line:
+            lines.append(nt_line)
         if result.get("blown"):
             lines.append(f"  ⚠️ {result['warning']}")
         # Post-close eval limit check: if this close pushed day P&L over DPL, notify + auto-close remaining
@@ -1633,6 +1709,31 @@ async def main():
             except Exception as e:
                 logger.warning(f"Failed to subscribe to live positions: {e}")
 
+    # ── Initialize NinjaTrader copy-trader (independent of TopstepX) ──
+    global _nt_copytrader, _nt_copy_agent
+    nt_enabled = os.getenv("NINJATRADER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "")
+    if nt_enabled:
+        nt_url = os.getenv("NINJATRADER_BRIDGE_URL", "http://localhost:5000")
+        nt_account = os.getenv("NINJATRADER_ACCOUNT", "TOF130830").strip()
+        # Copy agent defaults to the promoted agent so the same agent that mirrors
+        # to TopstepX also copy-trades to NinjaTrader.
+        _nt_copy_agent = os.getenv("NINJATRADER_COPY_AGENT", "").strip() or _promoted_agent
+        if not _nt_copy_agent:
+            logger.info("NinjaTrader copy trading: no copy agent set (PROMOTED_AGENT/NINJATRADER_COPY_AGENT) — disabled")
+        else:
+            try:
+                from ninjatrader_bridge import create_copytrader
+                _nt_copytrader = await create_copytrader(nt_url, nt_account)
+                if _nt_copytrader:
+                    logger.info(f"COPY TRADING enabled: {_nt_copy_agent} -> NinjaTrader account {nt_account}")
+                else:
+                    logger.warning("NinjaTrader copy trading disabled (bridge/account unavailable)")
+            except Exception as e:
+                logger.error(f"Failed to initialize NinjaTrader copy-trader: {e}")
+                _nt_copytrader = None
+    else:
+        logger.info("NinjaTrader copy trading disabled (NINJATRADER_ENABLED=false)")
+
     print("=" * 60)
     print("TopstepX Trading Arena (Simulated Accounts + RTC Prices)")
     print("=" * 60)
@@ -1659,6 +1760,8 @@ async def main():
         print(f"✓ RTC prices streaming | TopstepX account: {_live_account_id}")
     if _promoted_agent:
         print(f"✓ LIVE TRADING: {_promoted_agent} -> TopstepX account {_live_account_id}")
+    if _nt_copytrader:
+        print(f"✓ COPY TRADING: {_nt_copy_agent} -> NinjaTrader account {_nt_copytrader.account}")
     print("\nPress Ctrl+C to stop...")
 
     # ── Start web dashboard alongside Kafka service ────────────
@@ -1685,6 +1788,8 @@ async def main():
             set_account_id=_set_account_id,
             web_client=_web_client,
             dashboard_client=_dashboard_client,
+            ninjatrader_copytrader=_nt_copytrader,
+            copy_agent=_nt_copy_agent,
         )
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1731,6 +1836,8 @@ async def main():
             await _web_client.close()
         if _dashboard_client:
             await _dashboard_client.close()
+        if _nt_copytrader:
+            await _nt_copytrader.close()
         if _token_manager:
             await _token_manager.close()
         if _sim_manager:
