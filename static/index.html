@@ -130,7 +130,7 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
-  .copy-account .copy-header .copy-acct { color: var(--text-dim); font-weight: 600; text-transform: none; letter-spacing: 0; }
+  .copy-account .copy-header .copy-acct { display: inline-flex; align-items: center; color: var(--text-dim); font-weight: 600; text-transform: none; letter-spacing: 0; }
   .copy-account .copy-status { margin-left: auto; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 3px; }
   .copy-account .copy-status.connected { color: var(--green); border: 1px solid var(--green); }
   .copy-account .copy-status.disconnected { color: var(--red); border: 1px solid var(--red); }
@@ -666,6 +666,11 @@ function renderAgentPanel(panel, name, agent) {
   let copyHtml = '';
   const ca = agent.copyAccount;
   if (ca) {
+    // NinjaTrader "NT" logo, used in place of the word "NinjaTrader".
+    const ntLogo = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="150 332 898 536" fill="#FF4200" style="height:0.85lh;width:auto;display:block;flex:none;margin-right:5px" aria-label="NinjaTrader">' +
+      '<path d="M150 332 L332 332 L868 868 L508 868 L150 510 Z"/>' +
+      '<path d="M510 332 L1048 332 L1048 512 L870 512 L870 868 L690 868 L690 512 L510 512 Z"/>' +
+      '<path d="M150 686 L330 686 L330 868 L150 868 Z"/></svg>';
     const isConn = (ca.status || '').toLowerCase() === 'connected';
     const statusCls = isConn ? 'connected' : 'disconnected';
     const statusTxt = ca.status || (ca.loading ? 'Loading' : 'Unknown');
@@ -719,7 +724,7 @@ function renderAgentPanel(panel, name, agent) {
     copyHtml =
       '<div class="copy-account">' +
         '<div class="copy-header">Copied Account' +
-          '<span class="copy-acct">NinjaTrader ' + escapeHtml(ca.account || '') + '</span>' +
+          '<span class="copy-acct">' + ntLogo + escapeHtml(ca.account || '') + '</span>' +
           '<span class="copy-status ' + statusCls + '">' + escapeHtml(statusTxt) + '</span>' +
         '</div>' +
         copyBody +

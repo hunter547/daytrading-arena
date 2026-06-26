@@ -41,6 +41,7 @@ def create_app(
     web_client: Optional[TopstepXWebClient] = None,
     dashboard_client: Optional[TopstepDashboardClient] = None,
     ninjatrader_copytrader=None,
+    get_copytrader: Optional[Callable[[], object]] = None,
     copy_agent: str = "",
 ) -> FastAPI:
     """Create FastAPI app backed by SimAccountManager + optional TopstepX API.
@@ -58,9 +59,18 @@ def create_app(
         dashboard_client: Optional TopstepDashboardClient for balance history
         ninjatrader_copytrader: Optional NinjaTraderCopyTrader whose account is
                       shown as a "copied account" sub-panel under the copy agent
+        get_copytrader: Optional callable returning the current copy-trader. Takes
+                      precedence over ninjatrader_copytrader so the dashboard picks
+                      up a copy-trader that connects after startup (reconnect loop).
         copy_agent: Agent name whose trades are copy-traded to NinjaTrader
     """
     app = FastAPI(title="TopstepX Agent Arena", docs_url=None, redoc_url=None)
+
+    def _copytrader():
+        """Resolve the current copy-trader (live getter wins over the static one)."""
+        if get_copytrader is not None:
+            return get_copytrader()
+        return ninjatrader_copytrader
 
     reset_password = os.getenv("RESET_PASSWORD", "")
 
@@ -125,9 +135,10 @@ def create_app(
                             logger.debug(f"Web client refresh error: {e}")
 
                 # Refresh NinjaTrader copy-account snapshot
-                if ninjatrader_copytrader is not None:
+                _ct = _copytrader()
+                if _ct is not None:
                     try:
-                        copy_summary = await ninjatrader_copytrader.get_account_summary()
+                        copy_summary = await _ct.get_account_summary()
                         if "error" not in copy_summary:
                             _last_copy["summary"] = copy_summary
                         else:
@@ -285,12 +296,13 @@ def create_app(
 
         Returns None when copy trading isn't configured or no data yet.
         """
-        if ninjatrader_copytrader is None:
+        _ct = _copytrader()
+        if _ct is None:
             return None
         summary = _last_copy.get("summary")
         if not summary:
             return {
-                "account": getattr(ninjatrader_copytrader, "account", ""),
+                "account": getattr(_ct, "account", ""),
                 "loading": True,
             }
         return {
