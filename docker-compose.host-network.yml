@@ -129,6 +129,10 @@ services:
       - PROMOTED_AGENT=${PROMOTED_AGENT:-${MIRROR_AGENT:-}}
       - TOPSTEPX_ACCOUNT_ID=${TOPSTEPX_ACCOUNT_ID:-}
       - RESET_PASSWORD=${RESET_PASSWORD:-}
+      - NINJATRADER_ENABLED=${NINJATRADER_ENABLED:-true}
+      - NINJATRADER_BRIDGE_URL=${NINJATRADER_BRIDGE_URL:-http://localhost:5000}
+      - NINJATRADER_ACCOUNT=${NINJATRADER_ACCOUNT:-TOF130830}
+      - NINJATRADER_COPY_AGENT=${NINJATRADER_COPY_AGENT:-}
     command: >
       python topstepx_trading_tools.py
       --bootstrap-servers localhost:9092
