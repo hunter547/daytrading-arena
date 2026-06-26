@@ -779,6 +779,9 @@ async def topstepx_buy(
                 nt_line = f"\n  COPY: Sent to NinjaTrader account {_nt_copytrader.account}"
             else:
                 nt_line = f"\n  COPY FAILED: {nt_result.get('error', 'Unknown')}"
+        await _sync_ground_truth_reasoning(
+            agent_name, f"Bought {quantity}x {result.get('symbol', contract)} @ ${price:,.2f}."
+        )
         return (
             f"✓ BUY order filled\n"
             f"  Contract: {contract}\n"
@@ -852,6 +855,9 @@ async def topstepx_sell(
                 nt_line = f"\n  COPY: Sent to NinjaTrader account {_nt_copytrader.account}"
             else:
                 nt_line = f"\n  COPY FAILED: {nt_result.get('error', 'Unknown')}"
+        await _sync_ground_truth_reasoning(
+            agent_name, f"Sold {quantity}x {result.get('symbol', contract)} @ ${price:,.2f}."
+        )
         return (
             f"✓ SELL order filled\n"
             f"  Contract: {contract}\n"
@@ -940,6 +946,10 @@ async def topstepx_close(
         post_eval = await _check_eval_limits(agent_name)
         if post_eval:
             lines.append(f"\n{post_eval}")
+        await _sync_ground_truth_reasoning(
+            agent_name,
+            f"Closed {qty_closed}x {result.get('symbol', contract)} @ ${price:,.2f}, realized ${pnl:+,.2f}.",
+        )
         return "\n".join(lines)
     else:
         error = result.get("error", "Unknown error")
@@ -953,6 +963,42 @@ async def topstepx_close(
 
 _sentiment_caches: dict[str, dict] = {}  # agent_name -> {"time": float}
 _portfolio_caches: dict[str, dict] = {}  # agent_name -> cache dict
+
+
+async def _live_position_prefix(agent_name: str) -> tuple:
+    """Format a ground-truth position prefix from live sim positions, e.g.
+    '[LONG 1x MNQ P&L: $+80.00] ' or '[Flat] '. Read-only — never mutates any
+    cache or trade state. Returns (None, None) if positions can't be read."""
+    if _sim_manager is None:
+        return "[Flat] ", False
+    try:
+        positions = await _sim_manager.get_positions(agent_name)
+    except Exception:
+        return None, None
+    if not positions:
+        return "[Flat] ", False
+    parts = []
+    for pos in positions:
+        qty = pos["quantity"]
+        direction = "LONG" if qty > 0 else "SHORT"
+        pnl = pos.get("unrealizedPnL", 0.0)
+        parts.append(f"{direction} {abs(int(qty))}x {pos['symbol']} P&L: ${pnl:+,.2f}")
+    return f"[{', '.join(parts)}] ", True
+
+
+async def _sync_ground_truth_reasoning(agent_name: str, action: str) -> None:
+    """Snap the dashboard reasoning line to ground truth right after a trade, so a
+    stale pre-trade narration (e.g. 'waiting for $150 before exiting') never lingers
+    once the position has changed. DISPLAY ONLY: writes state['latest_reasoning'],
+    which the model never reads back. Does NOT touch any portfolio/sentiment cache
+    or any tool return value, so it cannot affect trade execution or management. The
+    agent's own report_sentiment narration overlays this on its next call."""
+    prefix, _ = await _live_position_prefix(agent_name)
+    if prefix is None:
+        return
+    state = _get_agent_state(agent_name)
+    state["latest_reasoning"] = prefix + action
+    state["last_active"] = datetime.now().isoformat()
 
 
 @agent_tool
@@ -999,14 +1045,10 @@ async def report_sentiment(
         return "Recorded. STOP — do not call any more tools this turn."
     s_cache["time"] = now
 
-    # ── Use cached portfolio state (already fetched by topstepx_portfolio)
-    if p_cache.get("has_positions"):
-        portfolio_prefix = p_cache.get("prefix", "[Unknown] ")
-    else:
-        portfolio_prefix = "[Flat] "
-
-    # Fetch fresh positions from sim manager when we have positions
-    if p_cache.get("has_positions") and _sim_manager:
+    # ── Build display prefix from live positions (ground truth). This only
+    #    affects the dashboard string, never a tool return or trade logic. ──
+    portfolio_prefix = p_cache.get("prefix", "[Unknown] ") if p_cache.get("has_positions") else "[Flat] "
+    if _sim_manager:
         try:
             positions = await _sim_manager.get_positions(agent_name)
             if positions:
@@ -1015,11 +1057,13 @@ async def report_sentiment(
                     qty = pos["quantity"]
                     direction = "LONG" if qty > 0 else "SHORT"
                     pnl = pos.get("unrealizedPnL", 0.0)
-                    parts.append(f"{direction} {abs(qty)}x {pos['symbol']} P&L: ${pnl:+,.2f}")
+                    parts.append(f"{direction} {abs(int(qty))}x {pos['symbol']} P&L: ${pnl:+,.2f}")
                 portfolio_prefix = f"[{', '.join(parts)}] "
             else:
                 portfolio_prefix = "[Flat] "
-                p_cache["has_positions"] = False
+                # Preserve prior throttle behavior: only correct a stale True flag.
+                if p_cache.get("has_positions"):
+                    p_cache["has_positions"] = False
         except Exception:
             pass
 
@@ -1721,16 +1765,47 @@ async def main():
         if not _nt_copy_agent:
             logger.info("NinjaTrader copy trading: no copy agent set (PROMOTED_AGENT/NINJATRADER_COPY_AGENT) — disabled")
         else:
-            try:
-                from ninjatrader_bridge import create_copytrader
-                _nt_copytrader = await create_copytrader(nt_url, nt_account)
-                if _nt_copytrader:
-                    logger.info(f"COPY TRADING enabled: {_nt_copy_agent} -> NinjaTrader account {nt_account}")
-                else:
-                    logger.warning("NinjaTrader copy trading disabled (bridge/account unavailable)")
-            except Exception as e:
-                logger.error(f"Failed to initialize NinjaTrader copy-trader: {e}")
-                _nt_copytrader = None
+            from ninjatrader_bridge import create_copytrader
+
+            async def _connect_nt(quiet: bool) -> bool:
+                """Attempt to (re)connect the NinjaTrader copy-trader. Returns True on success."""
+                global _nt_copytrader
+                try:
+                    ct = await create_copytrader(nt_url, nt_account, quiet=quiet)
+                except Exception as e:
+                    logger.error(f"Failed to initialize NinjaTrader copy-trader: {e}")
+                    return False
+                if ct:
+                    _nt_copytrader = ct
+                    return True
+                return False
+
+            # One eager attempt at startup so copy trading is live immediately
+            # when the bridge is already up.
+            if await _connect_nt(quiet=False):
+                logger.info(f"COPY TRADING enabled: {_nt_copy_agent} -> NinjaTrader account {nt_account}")
+            else:
+                logger.warning("NinjaTrader copy trading disabled (bridge/account "
+                               "unavailable) — reconnect loop will keep retrying")
+
+            # Background reconnect loop: a transient bridge outage at startup (or
+            # later) must not permanently disable copy trading. While disconnected,
+            # keep retrying quietly until the bridge comes back.
+            async def _nt_reconnect_loop():
+                while True:
+                    try:
+                        await asyncio.sleep(30)
+                        if _nt_copytrader is None:
+                            if await _connect_nt(quiet=True):
+                                logger.info(f"COPY TRADING reconnected: {_nt_copy_agent} "
+                                            f"-> NinjaTrader account {nt_account}")
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        logger.debug(f"NinjaTrader reconnect attempt error: {e}")
+
+            asyncio.create_task(_nt_reconnect_loop())
+            logger.info("NinjaTrader copy-trader reconnect loop started")
     else:
         logger.info("NinjaTrader copy trading disabled (NINJATRADER_ENABLED=false)")
 
@@ -1788,7 +1863,7 @@ async def main():
             set_account_id=_set_account_id,
             web_client=_web_client,
             dashboard_client=_dashboard_client,
-            ninjatrader_copytrader=_nt_copytrader,
+            get_copytrader=lambda: _nt_copytrader,
             copy_agent=_nt_copy_agent,
         )
 

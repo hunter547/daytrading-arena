@@ -437,15 +437,26 @@ async def create_copytrader(
     base_url: str,
     account: str,
     timeout: float = 10.0,
+    quiet: bool = False,
 ) -> Optional[NinjaTraderCopyTrader]:
-    """Create and health-check a copy-trader. Returns None if the bridge is down."""
+    """Create and health-check a copy-trader. Returns None if the bridge is down.
+
+    Set ``quiet=True`` to downgrade the "unreachable"/"not found" messages to
+    DEBUG — used by the background reconnect loop so a bridge that is simply not
+    up yet doesn't spam ERROR logs on every retry.
+    """
+    # When quiet, a failed attempt is expected (bridge may not be up yet), so
+    # report at DEBUG instead of ERROR/WARNING.
+    fail_log = logger.debug if quiet else logger.error
+    warn_log = logger.debug if quiet else logger.warning
+
     client = NinjaTraderBridgeClient(base_url, timeout=timeout)
     try:
         health = await client.health()
         if health.get("status") != "ok":
-            logger.warning(f"NinjaTrader bridge unhealthy: {health}")
+            warn_log(f"NinjaTrader bridge unhealthy: {health}")
     except Exception as e:
-        logger.error(f"NinjaTrader bridge unreachable at {base_url}: {e}")
+        fail_log(f"NinjaTrader bridge unreachable at {base_url}: {e}")
         await client.close()
         return None
 
@@ -454,15 +465,15 @@ async def create_copytrader(
         accounts = await client.get_accounts()
         acct = next((a for a in accounts if a.get("name") == account), None)
         if acct is None:
-            logger.error(f"NinjaTrader account '{account}' not found on bridge — "
-                         f"copy trading disabled")
+            fail_log(f"NinjaTrader account '{account}' not found on bridge — "
+                     f"copy trading disabled")
             await client.close()
             return None
         if acct.get("status") != "Connected":
-            logger.warning(f"NinjaTrader account '{account}' status is "
-                           f"{acct.get('status')} (not Connected)")
+            warn_log(f"NinjaTrader account '{account}' status is "
+                     f"{acct.get('status')} (not Connected)")
     except Exception as e:
-        logger.error(f"Failed to verify NinjaTrader account '{account}': {e}")
+        fail_log(f"Failed to verify NinjaTrader account '{account}': {e}")
         await client.close()
         return None
 
